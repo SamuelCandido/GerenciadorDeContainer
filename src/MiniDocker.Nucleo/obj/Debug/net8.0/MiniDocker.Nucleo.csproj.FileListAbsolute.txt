@@ -1,0 +1,11 @@
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\bin\Debug\net8.0\MiniDocker.Nucleo.deps.json
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\bin\Debug\net8.0\MiniDocker.Nucleo.dll
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\bin\Debug\net8.0\MiniDocker.Nucleo.pdb
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.AssemblyInfoInputs.cache
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.AssemblyInfo.cs
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.csproj.CoreCompileInputs.cache
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.dll
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\refint\MiniDocker.Nucleo.dll
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\MiniDocker.Nucleo.pdb
+C:\Users\Windows\Downloads\MiniDocker\src\MiniDocker.Nucleo\obj\Debug\net8.0\ref\MiniDocker.Nucleo.dll

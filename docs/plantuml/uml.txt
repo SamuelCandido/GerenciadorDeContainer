@@ -1,0 +1,113 @@
+@startuml MiniDocker
+
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+
+package "MiniDocker.Cli" {
+  class Program {
+    + Main(args: string[]) : int
+  }
+}
+
+package "MiniDocker.Nucleo.Modelos" {
+  enum EstadoConteiner {
+    Criado
+    Executando
+    Parado
+    Finalizado
+  }
+
+  class Conteiner {
+    + Id : string
+    + Nome : string
+    + Comando : string
+    + Estado : EstadoConteiner
+    + CriadoEm : DateTime
+    + IniciadoEm : DateTime?
+    + FinalizadoEm : DateTime?
+    + CaminhoRootFs : string
+    + IdProcesso : int?
+    + CodigoSaida : int?
+    + MemoriaUsadaBytes : long?
+    + TempoCpuMs : double?
+  }
+
+  Conteiner "1" -- "1" EstadoConteiner
+}
+
+package "MiniDocker.Nucleo.Repositorios" {
+  interface IRepositorioConteiner {
+    + ObterTodos() : List<Conteiner>
+    + ObterPorNome(nome: string) : Conteiner?
+    + Salvar(conteiner: Conteiner) : void
+    + Remover(nome: string) : void
+  }
+
+  class RepositorioConteinerArquivo {
+    - caminhoBase : string
+    + ObterTodos() : List<Conteiner>
+    + ObterPorNome(nome: string) : Conteiner?
+    + Salvar(conteiner: Conteiner) : void
+    + Remover(nome: string) : void
+  }
+
+  RepositorioConteinerArquivo ..|> IRepositorioConteiner
+  RepositorioConteinerArquivo ..> Conteiner : persiste
+}
+
+package "MiniDocker.Nucleo.Servicos" {
+  interface IServicoConteiner {
+    + Executar(nome: string, comando: string) : Conteiner
+    + Listar() : List<Conteiner>
+    + Parar(nome: string) : void
+    + Remover(nome: string) : void
+  }
+
+  class ServicoConteiner {
+    - repositorio : IRepositorioConteiner
+    - raizWorkspace : string
+    + Executar(nome: string, comando: string) : Conteiner
+    + Listar() : List<Conteiner>
+    + Parar(nome: string) : void
+    + Remover(nome: string) : void
+  }
+
+  ServicoConteiner ..|> IServicoConteiner
+  ServicoConteiner --> IRepositorioConteiner : usa
+  ServicoConteiner ..> Conteiner : cria/gerencia
+}
+
+Program --> IServicoConteiner : usa
+
+note right of ServicoConteiner
+  Executa o processo real do SO
+  (System.Diagnostics.Process),
+  capturando PID, memória e
+  tempo de CPU antes de finalizar.
+  Sem isolamento real (sem
+  namespaces/cgroups).
+end note
+
+package "Ideias futuras (não implementado)" #line.dashed {
+  class "Execução em background\n+ logs" as Futuro1 #line.dashed
+  class "Imagens reutilizáveis\n(rootfs empacotado)" as Futuro2 #line.dashed
+
+  note bottom of Futuro1
+    Protótipo 2 (ideia):
+    checar PID vivo, redirecionar
+    stdout/stderr, comando 'logs'.
+    Forma exata ainda em aberto.
+  end note
+
+  note bottom of Futuro2
+    Protótipo 3 (ideia):
+    conceito de "imagem" como
+    rootfs pronto para reuso.
+    Forma exata ainda em aberto.
+  end note
+}
+
+IServicoConteiner .[#gray,dashed].> Futuro1 : evolução futura
+IServicoConteiner .[#gray,dashed].> Futuro2 : evolução futura
+
+@enduml

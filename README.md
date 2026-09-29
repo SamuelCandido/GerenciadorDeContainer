@@ -2,9 +2,9 @@
 
 Gerenciador de containers didático em C#/.NET 10 para Windows, feito para a disciplina de Sistemas Operacionais.
 
-Cada container é um **grupo de processos controlado pelo kernel** através de um [Job Object](https://learn.microsoft.com/windows/win32/procthread/job-objects): o MiniDocker cria o grupo, aplica limites de memória, de número de processos e de CPU, executa o comando via `cmd.exe` e contabiliza o consumo real do grupo inteiro.
+Cada container é um **grupo de processos** criado dentro de um [Job Object](https://learn.microsoft.com/windows/win32/procthread/job-objects) do Windows, com restrições impostas pelo kernel e um ambiente próprio, separado do host.
 
-> **Limitar recursos não é isolar.** O MiniDocker impõe limites de verdade, mas não isola sistema de arquivos, rede nem lista de processos. A seção [Isolamento e limites](#isolamento-e-limites) detalha a diferença, e [docs/ETAPA-1.md](docs/ETAPA-1.md) traz a explicação conceitual completa.
+> **O isolamento é parcial — e não é simulado.** As restrições implementadas são aplicadas pelo kernel do Windows: quando o container tenta usar um recurso bloqueado, quem nega é o sistema operacional. O que **não** está isolado, e o motivo técnico de cada caso, está em [Isolamento](#isolamento). A explicação conceitual completa está em [docs/ETAPA-1.md](docs/ETAPA-1.md) e o passeio pelo código em [docs/CODIGO.md](docs/CODIGO.md).
 
 ## Índice
 
@@ -12,7 +12,7 @@ Cada container é um **grupo de processos controlado pelo kernel** através de u
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
 - [Como funciona](#como-funciona)
-- [Isolamento e limites](#isolamento-e-limites)
+- [Isolamento](#isolamento)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Entregas](#entregas)
 
@@ -38,44 +38,31 @@ dotnet run --project src\MiniDocker.Cli -- rm c1
 
 | Comando | O que faz |
 |---|---|
-| `run <nome> [limites] <comando>` | Cria o container, aplica os limites e executa o comando |
+| `run <nome> <comando>` | Cria o container e executa o comando dentro dele |
 | `ps` | Lista os containers registrados com estado e contabilidade |
 | `stop <nome>` | *Stub nesta entrega* — a execução é síncrona, não há processo em segundo plano |
 | `rm <nome>` | Remove o registro e o diretório do container |
 
-### Limites de recursos
-
-```bat
-minidocker run <nome> [--memoria <valor>] [--processos <n>] [--cpu <1-100>] <comando>
-```
-
-| Opção | Efeito | Limite correspondente |
-|---|---|---|
-| `--memoria 128M` | Alocar além do teto falha. Aceita sufixos `K`, `M` e `G` | `JOB_OBJECT_LIMIT_PROCESS_MEMORY` |
-| `--processos 4` | Criar o 5º processo falha. Barra fork bombs | `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` |
-| `--cpu 50` | O grupo nunca passa de 50% de CPU | `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP` |
-
-```bat
-minidocker run c1 --memoria 128M --processos 4 --cpu 50 "echo ola"
-```
+Limites de memória, CPU e número de processos chegam na 2ª entrega.
 
 ## Como funciona
 
 ```text
-run c1 --memoria 128M "comando"
+run c1 "comando"
     │
     ├─ 1. cria o diretório rootfs do container
-    ├─ 2. cria o Job Object e aplica os limites      ← kernel passa a impor
-    ├─ 3. inicia o cmd.exe com WorkingDirectory=rootfs
-    ├─ 4. atribui o processo ao Job Object           ← descendentes herdam
-    ├─ 5. aguarda o término
-    ├─ 6. lê a contabilidade do grupo                ← sobrevive ao término
-    └─ 7. fecha o Job Object                         ← mata o que sobrou
+    ├─ 2. cria o Job Object e aplica as restrições    ← kernel passa a impor
+    ├─ 3. monta um ambiente mínimo, sem herdar o host
+    ├─ 4. inicia o cmd.exe com WorkingDirectory=rootfs
+    ├─ 5. atribui o processo ao Job Object            ← descendentes herdam
+    ├─ 6. aguarda o término
+    ├─ 7. lê a contabilidade do grupo                 ← sobrevive ao término
+    └─ 8. fecha o Job Object                          ← mata o que sobrou
 ```
 
-O passo 4 é o que transforma um processo solto em container: a partir dele, **todo processo criado pelo comando nasce dentro do mesmo Job Object** e herda os mesmos limites. Não há como um neto escapar do teto.
+O passo 5 é o que transforma um processo solto em container: a partir dele, **todo processo criado pelo comando nasce dentro do mesmo Job Object** e herda as mesmas restrições. Nenhum neto escapa.
 
-O passo 6 só é confiável por causa de uma propriedade do Job Object: a contabilidade **sobrevive ao término dos processos**. Ler `Process.WorkingSet64` exigiria pegar o processo ainda vivo, o que é uma corrida contra comandos rápidos.
+O passo 7 só é confiável por causa de uma propriedade do Job Object: a contabilidade **sobrevive ao término dos processos**. Ler `Process.WorkingSet64` exigiria pegar o processo ainda vivo, o que é uma corrida contra comandos rápidos.
 
 ### Estados
 
@@ -85,46 +72,55 @@ O passo 6 só é confiável por causa de uma propriedade do Job Object: a contab
 
 Ficam em `%USERPROFILE%\.minidocker\containers.json`, e o rootfs de cada container em `%USERPROFILE%\.minidocker\containers\<nome>`.
 
-Cada registro funciona como um PCB simplificado: PID, estado, código de saída, limites aplicados e a contabilidade do grupo — pico de memória, tempo de CPU, total de processos criados e falhas de página.
+Cada registro funciona como um PCB simplificado: PID, estado, código de saída e a contabilidade do grupo — pico de memória, tempo de CPU, total de processos criados e falhas de página.
 
-## Isolamento e limites
+## Isolamento
 
-Esta é a distinção central do trabalho, então vale ser explícito.
+Esta é a parte central do trabalho, então vale ser preciso sobre onde está a fronteira.
 
-**O que é imposto pelo kernel:**
+### Imposto pelo kernel
 
-| Recurso | Como é imposto |
+Tudo abaixo é aplicado pelo Windows. O container recebe acesso negado ao tentar usar estes recursos — não há verificação em C#.
+
+| Restrição | Efeito |
 |---|---|
-| Memória | Alocação acima do teto falha |
-| Número de processos | Criação de processo acima do teto falha |
-| CPU | O escalonador não deixa o grupo passar do percentual |
-| Encerramento | `KILL_ON_JOB_CLOSE` mata o grupo inteiro, sem deixar órfãos |
+| `UILIMIT_GLOBALATOMS` | O grupo recebe uma **tabela de atoms global própria** — um namespace privado |
+| `UILIMIT_HANDLES` | Não alcança handles de janela de processos de fora do grupo |
+| `UILIMIT_READCLIPBOARD` / `WRITECLIPBOARD` | Não lê nem escreve na área de transferência do host |
+| `UILIMIT_DESKTOP` | Não cria nem troca de desktop |
+| `UILIMIT_SYSTEMPARAMETERS` / `DISPLAYSETTINGS` | Não altera configurações do sistema |
+| `UILIMIT_EXITWINDOWS` | Não desliga nem reinicia o Windows |
+| Ambiente próprio | Não herda nenhuma variável do host; `TEMP`/`TMP` apontam para o rootfs |
+| `LIMIT_KILL_ON_JOB_CLOSE` | Nenhum processo sobrevive ao fim do container |
 
-**O que não é isolado:**
+### Não implementado — 2ª entrega
 
-| Recurso | Consequência |
+| Recurso | O que falta |
 |---|---|
-| Sistema de arquivos | `CaminhoRootFs` é só o diretório inicial; caminhos absolutos saem dele |
-| Lista de processos | O container enxerga os processos do host via `tasklist` |
-| Variáveis de ambiente | O ambiente do processo pai é herdado inteiro |
-| Usuário e privilégios | Roda com as credenciais de quem chamou o MiniDocker |
-| Rede | Mesma pilha de rede e mesmas portas do host |
+| Sistema de arquivos | Confinar a escrita ao rootfs exige `CreateRestrictedToken` + `CreateProcessAsUser`. Uma ACL sozinha não resolve: sem token restrito, o container roda com a **sua** identidade, então tem os mesmos direitos que você. |
+| Privilégios | Mesmo mecanismo — derrubar privilégios exige o token restrito. |
 
-A separação não é acidental. No Linux, **isolamento** vem de namespaces (PID, mount, rede) e **controle de recursos** vem de cgroups — dois mecanismos distintos. O Job Object do Windows é o equivalente aos cgroups, não aos namespaces. O análogo de namespaces no Windows são os Server Silos, usados pelos Windows Containers via Host Compute System; implementá-los significaria embrulhar o runtime da Microsoft em vez de construir o próprio, o que está fora do escopo do trabalho.
+### Fora de alcance
+
+| Recurso | Por quê |
+|---|---|
+| Namespace de processos | O container enxerga o host via `tasklist`. Filtrar isso exige **Server Silos**, APIs não documentadas usadas pelo Host Compute System — seria embrulhar o runtime da Microsoft em vez de construir o próprio. |
+| Rede | Mesma pilha e mesmas portas do host, pelo mesmo motivo. |
+
+No Linux essa divisão é mais clara: **isolamento** vem de namespaces e **controle de recursos** vem de cgroups. O Job Object do Windows corresponde aos cgroups e cobre só uma parte dos namespaces — a do subsistema de janelas.
 
 ### Como verificar
 
 ```bat
-:: fork bomb barrada no limite de 3 processos
-minidocker run bomba --processos 3 "for /L %i in (1,1,50) do start /b cmd /c ping -n 5 127.0.0.1"
+:: o ambiente do host nao entra no container
+set SEGREDO_DO_HOST=senha-123
+minidocker run amb "echo [%SEGREDO_DO_HOST%]"
+:: imprime [%SEGREDO_DO_HOST%] literal, porque a variavel nao existe la dentro
 
 :: nenhum processo sobra: o ping morre junto com o container
 minidocker run orfao "start /b ping -n 100 127.0.0.1"
 
-:: teto de CPU observável no Gerenciador de Tarefas
-minidocker run cpu --cpu 10 "for /L %i in (1,1,100000000) do rem"
-
-:: ausência de isolamento: o container lê fora do rootfs e enxerga o host
+:: o que ainda NAO esta isolado, honestamente
 minidocker run sonda "cd & type C:\Windows\System32\drivers\etc\hosts & tasklist & whoami"
 ```
 
@@ -136,7 +132,7 @@ src/MiniDocker.Nucleo/
   Interop/        P/Invoke da API de Job Objects do Windows
   Repositorios/   Persistência em JSON
   Servicos/       Ciclo de vida do container
-src/MiniDocker.Cli/     Interface de linha de comando
+src/MiniDocker.Cli/      Interface de linha de comando
 tests/MiniDocker.Testes/ Testes unitários
 docs/ETAPA-1.md          Conceitos de SO aplicados nesta entrega
 docs/CODIGO.md           Passeio pelo código, arquivo por arquivo
@@ -146,6 +142,6 @@ docs/CODIGO.md           Passeio pelo código, arquivo por arquivo
 
 | Entrega | Situação | O que contém |
 |---|---|---|
-| **1ª — ciclo de vida e controle de recursos** | Implementada | Criação, execução, listagem e remoção. Cada container vira um Job Object com limites de memória, processos e CPU impostos pelo kernel, contabilidade exata do grupo e encerramento sem órfãos. |
-| **2ª — execução em segundo plano** | Planejada | `stop` real via `TerminateJobObject`, captura de `stdout`/`stderr` em log, consulta ao estado de containers vivos e restrição de privilégios com `CreateRestrictedToken`. |
-| **3ª — imagens reutilizáveis** | Planejada | Um rootfs base copiado para cada novo container, com restrição de acesso a arquivos por ACL de AppContainer. |
+| **1ª — isolamento e ciclo de vida** | Implementada | O container vira um grupo de processos num Job Object, com restrições de interface impostas pelo kernel, tabela de atoms própria, ambiente isolado do host e encerramento sem deixar órfãos. Criação, execução, listagem, remoção e contabilidade do grupo. |
+| **2ª — confinamento e execução em segundo plano** | Planejada | Token restrito (`CreateRestrictedToken` + `CreateProcessAsUser`) confinando a escrita ao rootfs; limites de memória, CPU e número de processos; `stop` real via `TerminateJobObject`; captura de `stdout`/`stderr` em log. |
+| **3ª — imagens reutilizáveis** | Planejada | Um rootfs base copiado para cada novo container. |

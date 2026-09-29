@@ -20,8 +20,32 @@ internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
 internal enum ClasseInformacaoTrabalho
 {
     ContabilidadeBasica = 1,
+    RestricoesUIBasicas = 4,
     LimitesEstendidos = 9,
     ControleTaxaCpu = 15
+}
+
+/// <summary>
+/// Restrições de interface que o Job Object impõe ao grupo. São o mecanismo de
+/// isolamento documentado mais forte da API: separam o container do host em
+/// recursos compartilhados do subsistema de janelas.
+/// </summary>
+[Flags]
+internal enum RestricoesUI : uint
+{
+    /// <summary>Não pode usar handles de janela de processos de fora do grupo.</summary>
+    Handles = 0x00000001,
+    LerAreaTransferencia = 0x00000002,
+    EscreverAreaTransferencia = 0x00000004,
+    /// <summary>Não pode alterar parâmetros do sistema.</summary>
+    ParametrosDoSistema = 0x00000008,
+    ConfiguracoesDeVideo = 0x00000010,
+    /// <summary>Recebe uma tabela de atoms globais própria — um namespace privado.</summary>
+    AtomsGlobais = 0x00000020,
+    /// <summary>Não pode criar nem trocar de desktop.</summary>
+    Desktop = 0x00000040,
+    /// <summary>Não pode desligar nem reiniciar o Windows.</summary>
+    DesligarWindows = 0x00000080
 }
 
 /// <summary>Sinalizadores de quais campos de limite estão em uso.</summary>
@@ -96,6 +120,13 @@ internal struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
     public uint TotalTerminatedProcesses;
 }
 
+/// <summary>Restrições de interface aplicadas a todo o grupo.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct JOBOBJECT_BASIC_UI_RESTRICTIONS
+{
+    public uint UIRestrictionsClass;
+}
+
 /// <summary>União: o mesmo espaço guarda a taxa, o peso ou o par min/max.</summary>
 [StructLayout(LayoutKind.Explicit)]
 internal struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION
@@ -136,6 +167,14 @@ internal static class NativeMethods
         SafeJobHandle trabalho,
         ClasseInformacaoTrabalho classe,
         ref JOBOBJECT_CPU_RATE_CONTROL_INFORMATION informacao,
+        uint tamanho);
+
+    [DllImport(Kernel32, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetInformationJobObject(
+        SafeJobHandle trabalho,
+        ClasseInformacaoTrabalho classe,
+        ref JOBOBJECT_BASIC_UI_RESTRICTIONS informacao,
         uint tamanho);
 
     [DllImport(Kernel32, SetLastError = true)]

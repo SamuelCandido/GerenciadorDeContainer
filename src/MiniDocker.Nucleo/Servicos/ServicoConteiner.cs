@@ -131,6 +131,26 @@ public class ServicoConteiner : IServicoConteiner
         };
         informacoes.ArgumentList.Add("/c");
         informacoes.ArgumentList.Add(comando);
+        IsolarAmbiente(informacoes, caminhoRootFs);
         return new Process { StartInfo = informacoes };
+    }
+
+    /// <summary>
+    /// Substitui o ambiente herdado do processo pai por um conjunto mínimo. Sem
+    /// isto, toda variável do host — inclusive credenciais e caminhos pessoais —
+    /// entraria no container. As variáveis de temporário apontam para o rootfs,
+    /// então arquivos temporários do container ficam dentro dele.
+    /// </summary>
+    private static void IsolarAmbiente(ProcessStartInfo informacoes, string caminhoRootFs)
+    {
+        var raizWindows = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+
+        informacoes.Environment.Clear();
+        informacoes.Environment["SystemRoot"] = raizWindows;
+        informacoes.Environment["ComSpec"] = Path.Combine(raizWindows, "system32", "cmd.exe");
+        informacoes.Environment["Path"] =
+            $"{Path.Combine(raizWindows, "system32")};{raizWindows}";
+        informacoes.Environment["TEMP"] = caminhoRootFs;
+        informacoes.Environment["TMP"] = caminhoRootFs;
     }
 }

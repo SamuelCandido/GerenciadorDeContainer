@@ -45,20 +45,31 @@ public class ServicoConteinerTestes : IDisposable
     }
 
     [FatoWindows]
-    public void ExecutarGuardaOsLimitesAplicados()
+    public void ContainerNaoHerdaVariaveisDeAmbienteDoHost()
     {
-        var limites = new LimitesRecursos
+        Environment.SetEnvironmentVariable("SEGREDO_DO_HOST", "senha-do-host-123");
+        try
         {
-            MemoriaMaximaBytes = 128 * 1024 * 1024,
-            ProcessosMaximos = 4,
-            PercentualMaximoCpu = 50
-        };
+            var conteiner = servico.Executar("c1", "echo [%SEGREDO_DO_HOST%] > saida.txt");
+            var saida = File.ReadAllText(Path.Combine(conteiner.CaminhoRootFs, "saida.txt"));
 
-        var conteiner = servico.Executar("c1", "echo hello", limites);
+            // O cmd.exe deixa a referência literal quando a variável não existe.
+            Assert.Contains("%SEGREDO_DO_HOST%", saida);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SEGREDO_DO_HOST", null);
+        }
+    }
 
-        Assert.Equal(128 * 1024 * 1024, conteiner.Limites.MemoriaMaximaBytes);
-        Assert.Equal(4, conteiner.Limites.ProcessosMaximos);
-        Assert.Equal(50, conteiner.Limites.PercentualMaximoCpu);
+    [FatoWindows]
+    public void ContainerRecebeAmbienteMinimoFuncional()
+    {
+        var conteiner = servico.Executar("c1", "echo %SystemRoot% > saida.txt");
+        var saida = File.ReadAllText(Path.Combine(conteiner.CaminhoRootFs, "saida.txt"));
+
+        Assert.DoesNotContain("%SystemRoot%", saida);
+        Assert.Equal(0, conteiner.CodigoSaida);
     }
 
     [FatoWindows]

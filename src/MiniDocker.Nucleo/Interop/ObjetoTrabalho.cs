@@ -36,6 +36,38 @@ public sealed class ObjetoTrabalho : IDisposable
 
         AplicarLimitesEstendidos(limites);
         AplicarLimiteCpu(limites);
+        AplicarRestricoesUI();
+    }
+
+    /// <summary>
+    /// Separa o container do host nos recursos compartilhados do subsistema de
+    /// janelas. Estas restrições são impostas pelo kernel, não simuladas: o
+    /// processo passa a receber acesso negado ao tentar usá-los.
+    /// </summary>
+    private void AplicarRestricoesUI()
+    {
+        var informacao = new JOBOBJECT_BASIC_UI_RESTRICTIONS
+        {
+            UIRestrictionsClass = (uint)(
+                RestricoesUI.Handles |                    // não alcança janelas de fora
+                RestricoesUI.LerAreaTransferencia |
+                RestricoesUI.EscreverAreaTransferencia |
+                RestricoesUI.ParametrosDoSistema |
+                RestricoesUI.ConfiguracoesDeVideo |
+                RestricoesUI.AtomsGlobais |               // tabela de atoms própria
+                RestricoesUI.Desktop |
+                RestricoesUI.DesligarWindows)
+        };
+
+        if (!NativeMethods.SetInformationJobObject(
+                handle,
+                ClasseInformacaoTrabalho.RestricoesUIBasicas,
+                ref informacao,
+                (uint)Marshal.SizeOf<JOBOBJECT_BASIC_UI_RESTRICTIONS>()))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Nao foi possivel aplicar as restricoes de interface.");
+        }
     }
 
     /// <summary>

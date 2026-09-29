@@ -1,0 +1,30 @@
+# Artefatos de build do .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.dll
+*.pdb
+*.exe
+*.cache
+
+# Resultados de teste e cobertura
+[Tt]est[Rr]esult*/
+coverage*.json
+coverage*.xml
+*.coverage
+*.trx
+
+# Configuração de IDE e de usuário
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+
+# Sistema operacional
+.DS_Store
+Thumbs.db

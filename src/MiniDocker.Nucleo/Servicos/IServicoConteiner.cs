@@ -4,7 +4,7 @@ namespace MiniDocker.Nucleo.Servicos;
 
 public interface IServicoConteiner
 {
-    Conteiner Executar(string nome, string comando);
+    Conteiner Executar(string nome, string comando, LimitesRecursos? limites = null);
     IReadOnlyList<Conteiner> Listar();
     void Parar(string nome);
     void Remover(string nome);

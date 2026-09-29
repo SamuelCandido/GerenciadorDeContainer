@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
+using MiniDocker.Nucleo.Interop;
 using MiniDocker.Nucleo.Modelos;
 using MiniDocker.Nucleo.Repositorios;
 
@@ -23,10 +23,15 @@ public class ServicoConteiner : IServicoConteiner
         Directory.CreateDirectory(Path.Combine(this.raizWorkspace, "containers"));
     }
 
-    public Conteiner Executar(string nome, string comando)
+    public Conteiner Executar(string nome, string comando, LimitesRecursos? limites = null)
     {
         ValidarTexto(nome, nameof(nome));
         ValidarTexto(comando, nameof(comando));
+
+        // Validado antes de criar diretório ou registro, para que um limite
+        // inválido não deixe um container pela metade no repositório.
+        limites ??= LimitesRecursos.Nenhum;
+        limites.Validar();
 
         if (repositorio.ObterPorNome(nome) is not null)
         {
@@ -40,31 +45,36 @@ public class ServicoConteiner : IServicoConteiner
         {
             Nome = nome,
             Comando = comando,
-            CaminhoRootFs = caminhoRootFs
+            CaminhoRootFs = caminhoRootFs,
+            Limites = limites
         };
         repositorio.Salvar(conteiner);
 
+        // O Job Object nasce antes do processo: assim que o processo é atribuído
+        // ao grupo, todo descendente dele já nasce sujeito aos mesmos limites.
+        using var trabalho = new ObjetoTrabalho(limites);
         using var processo = CriarProcesso(comando, caminhoRootFs);
+
         conteiner.IniciadoEm = DateTime.UtcNow;
         conteiner.Estado = EstadoConteiner.Executando;
         processo.Start();
         conteiner.IdProcesso = processo.Id;
+        var noGrupo = trabalho.Atribuir(processo);
         repositorio.Salvar(conteiner);
 
-        // A leitura ocorre enquanto o processo ainda pode ser consultado; após o
-        // término, algumas plataformas deixam de disponibilizar estas propriedades.
-        try
-        {
-            conteiner.MemoriaUsadaBytes = processo.WorkingSet64;
-            conteiner.TempoCpuMs = processo.TotalProcessorTime.TotalMilliseconds;
-        }
-        catch (InvalidOperationException)
-        {
-            // Comandos instantâneos podem terminar nesta pequena janela de corrida.
-            conteiner.MemoriaUsadaBytes = 0;
-            conteiner.TempoCpuMs = 0;
-        }
         processo.WaitForExit();
+
+        // A contabilidade do Job Object sobrevive ao fim dos processos, então a
+        // leitura não corre contra o término: os números cobrem o grupo inteiro,
+        // inclusive os netos que o comando tenha criado.
+        var contabilidade = noGrupo
+            ? trabalho.Contabilizar()
+            : new ContabilidadeTrabalho(0, 0, 0, 0);
+        conteiner.MemoriaUsadaBytes = contabilidade.PicoMemoriaBytes;
+        conteiner.TempoCpuMs = contabilidade.TempoCpuMs;
+        conteiner.TotalProcessos = contabilidade.TotalProcessos;
+        conteiner.FalhasDePagina = contabilidade.FalhasDePagina;
+
         conteiner.CodigoSaida = processo.ExitCode;
         conteiner.FinalizadoEm = DateTime.UtcNow;
         conteiner.Estado = EstadoConteiner.Finalizado;
@@ -115,11 +125,11 @@ public class ServicoConteiner : IServicoConteiner
     {
         var informacoes = new ProcessStartInfo
         {
-            FileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd.exe" : "/bin/sh",
+            FileName = "cmd.exe",
             WorkingDirectory = caminhoRootFs,
             UseShellExecute = false
         };
-        informacoes.ArgumentList.Add(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "/c" : "-c");
+        informacoes.ArgumentList.Add("/c");
         informacoes.ArgumentList.Add(comando);
         return new Process { StartInfo = informacoes };
     }

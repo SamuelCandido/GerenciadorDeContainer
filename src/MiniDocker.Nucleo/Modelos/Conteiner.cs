@@ -14,8 +14,17 @@ public class Conteiner
     public string CaminhoRootFs { get; set; } = string.Empty;
     public int? IdProcesso { get; set; }
     public int? CodigoSaida { get; set; }
+
+    /// <summary>Limites impostos ao grupo de processos pelo Job Object.</summary>
+    public LimitesRecursos Limites { get; set; } = LimitesRecursos.Nenhum;
+
+    /// <summary>Pico de memória do grupo, medido pelo Job Object.</summary>
     public long? MemoriaUsadaBytes { get; set; }
     public double? TempoCpuMs { get; set; }
+
+    /// <summary>Quantos processos o grupo chegou a criar, incluindo os netos.</summary>
+    public int? TotalProcessos { get; set; }
+    public long? FalhasDePagina { get; set; }
 
     private static string GerarId()
     {

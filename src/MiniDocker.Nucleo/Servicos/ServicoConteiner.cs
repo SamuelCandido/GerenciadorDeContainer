@@ -50,35 +50,43 @@ public class ServicoConteiner : IServicoConteiner
         };
         repositorio.Salvar(conteiner);
 
-        // O Job Object nasce antes do processo: assim que o processo é atribuído
-        // ao grupo, todo descendente dele já nasce sujeito aos mesmos limites.
-        using var trabalho = new ObjetoTrabalho(limites);
-        using var processo = CriarProcesso(comando, caminhoRootFs);
+        try
+        {
+            // O Job Object nasce antes do processo: assim que o processo é atribuído
+            // ao grupo, todo descendente dele já nasce sujeito aos mesmos limites.
+            using var trabalho = new ObjetoTrabalho(limites);
+            using var processo = CriarProcesso(comando, caminhoRootFs);
 
-        conteiner.IniciadoEm = DateTime.UtcNow;
-        conteiner.Estado = EstadoConteiner.Executando;
-        processo.Start();
-        conteiner.IdProcesso = processo.Id;
-        var noGrupo = trabalho.Atribuir(processo);
-        repositorio.Salvar(conteiner);
+            conteiner.IniciadoEm = DateTime.UtcNow;
+            conteiner.Estado = EstadoConteiner.Executando;
+            processo.Start();
+            conteiner.IdProcesso = processo.Id;
+            var noGrupo = trabalho.Atribuir(processo);
+            repositorio.Salvar(conteiner);
 
-        processo.WaitForExit();
+            processo.WaitForExit();
 
-        // A contabilidade do Job Object sobrevive ao fim dos processos, então a
-        // leitura não corre contra o término: os números cobrem o grupo inteiro,
-        // inclusive os netos que o comando tenha criado.
-        var contabilidade = noGrupo
-            ? trabalho.Contabilizar()
-            : new ContabilidadeTrabalho(0, 0, 0, 0);
-        conteiner.MemoriaUsadaBytes = contabilidade.PicoMemoriaBytes;
-        conteiner.TempoCpuMs = contabilidade.TempoCpuMs;
-        conteiner.TotalProcessos = contabilidade.TotalProcessos;
-        conteiner.FalhasDePagina = contabilidade.FalhasDePagina;
-
-        conteiner.CodigoSaida = processo.ExitCode;
-        conteiner.FinalizadoEm = DateTime.UtcNow;
-        conteiner.Estado = EstadoConteiner.Finalizado;
-        repositorio.Salvar(conteiner);
+            // A contabilidade do Job Object sobrevive ao fim dos processos, então a
+            // leitura não corre contra o término: os números cobrem o grupo inteiro,
+            // inclusive os netos que o comando tenha criado.
+            var contabilidade = noGrupo
+                ? trabalho.Contabilizar()
+                : new ContabilidadeTrabalho(0, 0, 0, 0);
+            conteiner.MemoriaUsadaBytes = contabilidade.PicoMemoriaBytes;
+            conteiner.TempoCpuMs = contabilidade.TempoCpuMs;
+            conteiner.TotalProcessos = contabilidade.TotalProcessos;
+            conteiner.FalhasDePagina = contabilidade.FalhasDePagina;
+            conteiner.CodigoSaida = processo.ExitCode;
+        }
+        finally
+        {
+            // Mesmo se a execução falhar no meio, o registro não pode ficar preso
+            // em Executando: o using já encerrou o grupo, e um container nesse
+            // estado nunca mais poderia ser removido. CodigoSaida nulo indica falha.
+            conteiner.FinalizadoEm = DateTime.UtcNow;
+            conteiner.Estado = EstadoConteiner.Finalizado;
+            repositorio.Salvar(conteiner);
+        }
 
         return conteiner;
     }

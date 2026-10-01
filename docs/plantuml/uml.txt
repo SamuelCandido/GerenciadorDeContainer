@@ -28,37 +28,90 @@ package "MiniDocker.Nucleo.Modelos" {
     + CaminhoRootFs : string
     + IdProcesso : int?
     + CodigoSaida : int?
+    + Limites : LimitesRecursos
     + MemoriaUsadaBytes : long?
     + TempoCpuMs : double?
+    + TotalProcessos : int?
+    + FalhasDePagina : long?
+  }
+
+  class LimitesRecursos <<record>> {
+    + MemoriaMaximaBytes : long?
+    + ProcessosMaximos : int?
+    + PercentualMaximoCpu : int?
+    + {static} Nenhum : LimitesRecursos
+    + AlgumDefinido : bool
+    + Validar() : void
+  }
+
+  class ContabilidadeTrabalho <<record>> {
+    + TempoCpuMs : double
+    + PicoMemoriaBytes : long
+    + TotalProcessos : int
+    + FalhasDePagina : long
   }
 
   Conteiner "1" -- "1" EstadoConteiner
+  Conteiner "1" *-- "1" LimitesRecursos
 }
 
 package "MiniDocker.Nucleo.Repositorios" {
   interface IRepositorioConteiner {
-    + ObterTodos() : List<Conteiner>
+    + ObterTodos() : IReadOnlyList<Conteiner>
     + ObterPorNome(nome: string) : Conteiner?
     + Salvar(conteiner: Conteiner) : void
     + Remover(nome: string) : void
   }
 
   class RepositorioConteinerArquivo {
-    - caminhoBase : string
-    + ObterTodos() : List<Conteiner>
+    - caminhoArquivo : string
+    - sincronizador : object
+    + ObterTodos() : IReadOnlyList<Conteiner>
     + ObterPorNome(nome: string) : Conteiner?
     + Salvar(conteiner: Conteiner) : void
     + Remover(nome: string) : void
   }
 
   RepositorioConteinerArquivo ..|> IRepositorioConteiner
-  RepositorioConteinerArquivo ..> Conteiner : persiste
+  RepositorioConteinerArquivo ..> Conteiner : persiste em JSON
+}
+
+package "MiniDocker.Nucleo.Interop" {
+  class ObjetoTrabalho {
+    - handle : SafeJobHandle
+    + ObjetoTrabalho(limites: LimitesRecursos)
+    + Atribuir(processo: Process) : bool
+    + Contabilizar() : ContabilidadeTrabalho
+    + Encerrar(codigoSaida: int) : void
+    + Dispose() : void
+    - AplicarLimitesEstendidos(limites: LimitesRecursos) : void
+    - AplicarLimiteCpu(limites: LimitesRecursos) : void
+    - AplicarRestricoesUI() : void
+  }
+
+  class SafeJobHandle {
+    # ReleaseHandle() : bool
+  }
+
+  class NativeMethods <<static>> {
+    CreateJobObjectW()
+    AssignProcessToJobObject()
+    SetInformationJobObject()
+    QueryInformationJobObject()
+    TerminateJobObject()
+    CloseHandle()
+  }
+
+  ObjetoTrabalho *-- SafeJobHandle
+  ObjetoTrabalho ..> NativeMethods : P/Invoke
+  ObjetoTrabalho ..> LimitesRecursos : aplica
+  ObjetoTrabalho ..> ContabilidadeTrabalho : produz
 }
 
 package "MiniDocker.Nucleo.Servicos" {
   interface IServicoConteiner {
-    + Executar(nome: string, comando: string) : Conteiner
-    + Listar() : List<Conteiner>
+    + Executar(nome: string, comando: string, limites: LimitesRecursos?) : Conteiner
+    + Listar() : IReadOnlyList<Conteiner>
     + Parar(nome: string) : void
     + Remover(nome: string) : void
   }
@@ -66,44 +119,54 @@ package "MiniDocker.Nucleo.Servicos" {
   class ServicoConteiner {
     - repositorio : IRepositorioConteiner
     - raizWorkspace : string
-    + Executar(nome: string, comando: string) : Conteiner
-    + Listar() : List<Conteiner>
+    + Executar(nome: string, comando: string, limites: LimitesRecursos?) : Conteiner
+    + Listar() : IReadOnlyList<Conteiner>
     + Parar(nome: string) : void
     + Remover(nome: string) : void
+    - CriarProcesso(comando: string, caminhoRootFs: string) : Process
+    - IsolarAmbiente(informacoes: ProcessStartInfo, caminhoRootFs: string) : void
   }
 
   ServicoConteiner ..|> IServicoConteiner
   ServicoConteiner --> IRepositorioConteiner : usa
   ServicoConteiner ..> Conteiner : cria/gerencia
+  ServicoConteiner ..> ObjetoTrabalho : cria um por execução
 }
 
 Program --> IServicoConteiner : usa
 
+note right of ObjetoTrabalho
+  Envólucro do Job Object do Windows.
+  O kernel impõe as restrições de UI
+  e o KILL_ON_JOB_CLOSE; a contabilidade
+  cobre o grupo inteiro e sobrevive ao
+  término dos processos.
+end note
+
 note right of ServicoConteiner
-  Executa o processo real do SO
-  (System.Diagnostics.Process),
-  capturando PID, memória e
-  tempo de CPU antes de finalizar.
-  Sem isolamento real (sem
-  namespaces/cgroups).
+  Executa cmd.exe /c dentro do Job Object,
+  com ambiente mínimo (sem herdar o host)
+  e WorkingDirectory = rootfs.
+  Sem isolamento de PID, rede ou
+  sistema de arquivos.
 end note
 
 package "Ideias futuras (não implementado)" #line.dashed {
-  class "Execução em background\n+ logs" as Futuro1 #line.dashed
-  class "Imagens reutilizáveis\n(rootfs empacotado)" as Futuro2 #line.dashed
+  class "Token restrito + segundo plano\n+ logs + limites na CLI" as Futuro1 #line.dashed
+  class "Imagens reutilizáveis\n(rootfs base)" as Futuro2 #line.dashed
 
   note bottom of Futuro1
-    Protótipo 2 (ideia):
-    checar PID vivo, redirecionar
-    stdout/stderr, comando 'logs'.
-    Forma exata ainda em aberto.
+    2ª entrega:
+    CreateRestrictedToken + CreateProcessAsUser,
+    stop via TerminateJobObject,
+    stdout/stderr em log,
+    flags --memoria/--processos/--cpu.
   end note
 
   note bottom of Futuro2
-    Protótipo 3 (ideia):
-    conceito de "imagem" como
-    rootfs pronto para reuso.
-    Forma exata ainda em aberto.
+    3ª entrega:
+    um rootfs base copiado
+    para cada novo container.
   end note
 }
 

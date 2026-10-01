@@ -145,3 +145,15 @@ docs/CODIGO.md           Passeio pelo código, arquivo por arquivo
 | **1ª — isolamento e ciclo de vida** | Implementada | O container vira um grupo de processos num Job Object, com restrições de interface impostas pelo kernel, tabela de atoms própria, ambiente isolado do host e encerramento sem deixar órfãos. Criação, execução, listagem, remoção e contabilidade do grupo. |
 | **2ª — confinamento e execução em segundo plano** | Planejada | Token restrito (`CreateRestrictedToken` + `CreateProcessAsUser`) confinando a escrita ao rootfs; limites de memória, CPU e número de processos; `stop` real via `TerminateJobObject`; captura de `stdout`/`stderr` em log. |
 | **3ª — imagens reutilizáveis** | Planejada | Um rootfs base copiado para cada novo container. |
+
+## Possíveis melhorias
+
+O que o MiniDocker ainda **não** faz:
+
+- Impedir que o container leia ou escreva arquivos fora da sua pasta
+- Esconder os processos do host
+- Isolar a rede
+- Rodar em segundo plano
+- Guardar logs
+- Usar imagens
+- Aceitar limites de memória, CPU e número de processos pela CLI (o núcleo já suporta)

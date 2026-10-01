@@ -34,18 +34,19 @@ A regra é que as setas só apontam para baixo. O `Cli` não conhece Job Object;
 Vale decorar este caminho — é a espinha da explicação:
 
 ```text
-minidocker run c1 --memoria 128M "echo ola"
+minidocker run c1 "echo ola"
         │
         ▼
-Program.cs                    separa limites do comando
+Program.cs                    junta o resto dos argumentos no comando
         │
         ▼
 ServicoConteiner.Executar     valida, cria o registro
         │
-        ├──► ObjetoTrabalho    cria o Job Object e aplica os limites
+        ├──► ObjetoTrabalho    cria o Job Object e aplica as restrições
         │         │
         │         └──► NativeMethods ──► kernel32.dll ──► kernel
         │
+        ├──► IsolarAmbiente    monta o ambiente mínimo, sem herdar o host
         ├──► Process.Start     lança o cmd.exe
         ├──► Atribuir          põe o processo dentro do job
         ├──► WaitForExit       aguarda
@@ -54,6 +55,8 @@ ServicoConteiner.Executar     valida, cria o registro
         ▼
 RepositorioConteinerArquivo   grava em containers.json
 ```
+
+O diagrama de classes completo está em [plantuml/uml.txt](plantuml/uml.txt).
 
 ## 3. Camada de modelos
 
@@ -94,7 +97,7 @@ public int?  ProcessosMaximos   { get; init; }
 public int?  PercentualMaximoCpu { get; init; }
 ```
 
-`null` significa "sem limite para este recurso". `LimitesRecursos.Nenhum` é a instância compartilhada sem nenhum limite.
+`null` significa "sem limite para este recurso". `LimitesRecursos.Nenhum` é a instância compartilhada sem nenhum limite — e é a que a CLI usa hoje, já que as flags de limite só chegam na 2ª entrega. O núcleo já aceita e aplica os limites; falta só expô-los na linha de comando.
 
 `Validar()` recusa valores impossíveis — memória ou processos ≤ 0, CPU fora de 1–100 — lançando `ArgumentOutOfRangeException`. **É chamado no começo do `Executar`**, antes de criar diretório ou registro, para que um limite inválido não deixe um container pela metade no repositório.
 
@@ -142,15 +145,18 @@ O tipo `nuint` aparece nos campos de memória porque o `SIZE_T` do Windows tem o
 
 A classe que embrulha o Job Object e esconde o P/Invoke do resto do sistema. Quatro operações:
 
-**Construtor** — cria o job e aplica os limites:
+**Construtor** — cria o job e aplica as restrições:
 
 ```csharp
 handle = NativeMethods.CreateJobObjectW(IntPtr.Zero, null);
 AplicarLimitesEstendidos(limites);
 AplicarLimiteCpu(limites);
+AplicarRestricoesUI();
 ```
 
 Em `AplicarLimitesEstendidos`, cada limite acende um bit em `LimitFlags`. O `KILL_ON_JOB_CLOSE` é aceso **sempre**, independente do que o usuário pediu — é ele que garante que nenhum processo sobreviva ao container.
+
+`AplicarRestricoesUI` é aplicado a todo container e é o isolamento documentado mais forte da API: combina as flags de `RestricoesUI` (atoms globais próprios, sem clipboard, sem handles de janela de fora, sem desktop, sem alterar configurações, sem desligar o Windows) e entrega ao kernel numa `JOBOBJECT_BASIC_UI_RESTRICTIONS`.
 
 **`Atribuir(Process)`** — move o processo para dentro do grupo. Retorna `bool` em vez de lançar exceção quando o processo já terminou, pelo motivo explicado na [seção 7](#7-a-corrida-que-não-deu-para-fechar).
 
@@ -191,18 +197,26 @@ if (repositorio.ObterPorNome(nome) is not null) // 3. nome já existe?
 Directory.CreateDirectory(caminhoRootFs);       // 4. cria o rootfs
 repositorio.Salvar(conteiner);                  // 5. registra
 
-using var trabalho = new ObjetoTrabalho(limites); // 6. job ANTES do processo
-using var processo = CriarProcesso(...);
+try
+{
+    using var trabalho = new ObjetoTrabalho(limites); // 6. job ANTES do processo
+    using var processo = CriarProcesso(...);          //    com ambiente isolado
 
-processo.Start();                               // 7. lança
-var noGrupo = trabalho.Atribuir(processo);      // 8. põe no grupo
-processo.WaitForExit();                         // 9. aguarda
+    processo.Start();                               // 7. lança
+    var noGrupo = trabalho.Atribuir(processo);      // 8. põe no grupo
+    processo.WaitForExit();                         // 9. aguarda
 
-var contabilidade = trabalho.Contabilizar();    // 10. mede o grupo
-conteiner.CodigoSaida = processo.ExitCode;
-conteiner.Estado = EstadoConteiner.Finalizado;
-repositorio.Salvar(conteiner);                  // 11. grava o resultado
+    var contabilidade = trabalho.Contabilizar();    // 10. mede o grupo
+    conteiner.CodigoSaida = processo.ExitCode;
+}
+finally
+{
+    conteiner.Estado = EstadoConteiner.Finalizado;
+    repositorio.Salvar(conteiner);                  // 11. grava o resultado
+}
 ```
+
+O `finally` garante que o container nunca fica preso em `Executando`. Sem ele, uma exceção no meio da execução deixaria o registro nesse estado para sempre — e como `Remover` recusa apagar um container em execução, ele não sairia mais do `ps`. Uma falha aparece como `Finalizado` com `CodigoSaida` nulo.
 
 A ordem dos passos **6, 7 e 8** é o ponto técnico da entrega. O job existe antes do processo, e a atribuição acontece imediatamente após o lançamento, porque é ela que faz os limites valerem para todos os descendentes.
 
@@ -217,6 +231,8 @@ UseShellExecute = false
 ```
 
 `UseShellExecute = false` cria o processo diretamente pelo SO em vez de pedir ao Windows Explorer, que é o necessário para controlar o processo e para que a atribuição ao job funcione.
+
+`IsolarAmbiente` limpa o ambiente herdado (`Environment.Clear()`) e passa só `SystemRoot`, `ComSpec` e `Path`, com `TEMP`/`TMP` apontando para o rootfs. Sem isso, toda variável do host — inclusive credenciais — entraria no container.
 
 `Parar` ainda lança exceção: com execução síncrona, não há processo vivo quando o comando retorna. `Remover` recusa apagar um container em execução e, fora isso, remove o registro e o diretório.
 
@@ -234,18 +250,21 @@ Na prática a janela é de microssegundos contra os ~10 ms de inicialização do
 
 Usa *top-level statements*, então não há `class Program` nem `Main` explícito. Um `switch` sobre `args[0]` despacha os comandos.
 
-A parte interessante é `InterpretarArgumentosDeExecucao`, que separa os limites do comando. A regra: enquanto o argumento for uma flag conhecida (`--memoria`, `--processos`, `--cpu`), consome a flag e seu valor; no primeiro argumento que não é flag, **tudo dali em diante é o comando**.
+No `run`, `args[1]` é o nome e **tudo dali em diante é o comando**, unido por espaços:
 
-```csharp
-minidocker run c1 --memoria 128M --cpu 50 echo ola
-                  └────── flags ───────┘ └comando┘
+```text
+minidocker run c1 echo ola
+               └┘ └──────┘
+              nome comando
 ```
 
-`InterpretarTamanho` aceita os sufixos `K`, `M` e `G`, convertendo para bytes por potências de 1024.
+A CLI ainda não aceita flags de limite — `Executar` é chamado sem `LimitesRecursos`, então vale `LimitesRecursos.Nenhum`. As flags `--memoria`, `--processos` e `--cpu` entram na 2ª entrega.
+
+Toda exceção vinda do núcleo é capturada num único `catch`, impressa em `stderr`, e o programa sai com código 1.
 
 ## 9. Testes
 
-`tests/MiniDocker.Testes/` tem 14 testes: **8 rodam em qualquer sistema** e **6 exigem Windows**.
+`tests/MiniDocker.Testes/` tem 15 casos de teste: **8 rodam em qualquer sistema** e **7 exigem Windows**.
 
 O atributo `FatoWindowsAttribute` herda de `FactAttribute` e preenche `Skip` quando não está no Windows:
 
@@ -256,9 +275,9 @@ if (!OperatingSystem.IsWindows())
 
 Assim o teste é **ignorado** em vez de **falhar** fora do Windows. A diferença é de honestidade: um teste pulado deixa explícito que aquilo não foi verificado naquele ambiente, enquanto uma suíte vermelha esconde os problemas reais no meio do ruído.
 
-Os 8 independentes de plataforma cobrem validação — nome vazio, limites inválidos, e o caso de um limite inválido não deixar container pela metade. Os 6 do Windows cobrem execução, contabilidade e ciclo de vida.
+Os 8 independentes de plataforma cobrem validação — nome vazio, limites inválidos, `stop` de container inexistente e o caso de um limite inválido não deixar container pela metade. Os 7 do Windows cobrem execução, contabilidade do grupo, ambiente isolado e ciclo de vida.
 
-> **Ponto de honestidade:** esta entrega foi desenvolvida em Linux, então os 6 testes de Windows ainda não foram executados. Eles precisam rodar numa máquina Windows para que o P/Invoke seja validado de fato.
+O desenvolvimento foi feito em Linux, onde os 7 testes de Windows são pulados; eles foram executados numa máquina Windows e passaram, o que valida o P/Invoke de fato.
 
 ## 10. Decisões que podem ser questionadas
 

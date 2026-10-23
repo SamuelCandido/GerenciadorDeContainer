@@ -2,15 +2,16 @@
 
 Gerenciador de containers didático em C#/.NET 10 para Windows, feito para a disciplina de Sistemas Operacionais.
 
-Cada container é um **grupo de processos** criado dentro de um [Job Object](https://learn.microsoft.com/windows/win32/procthread/job-objects) do Windows, com restrições impostas pelo kernel e um ambiente próprio, separado do host.
+Cada container é um **grupo de processos** criado dentro de um [Job Object](https://learn.microsoft.com/windows/win32/procthread/job-objects) do Windows, com restrições impostas pelo kernel, ambiente próprio, sistema de arquivos copiado de uma **imagem** e ciclo de vida completo: criar, iniciar, parar, reiniciar, executar comandos dentro, ver logs e remover.
 
-> **O isolamento é parcial — e não é simulado.** As restrições implementadas são aplicadas pelo kernel do Windows: quando o container tenta usar um recurso bloqueado, quem nega é o sistema operacional. O que **não** está isolado, e o motivo técnico de cada caso, está em [Isolamento](#isolamento). A explicação conceitual completa está em [docs/ETAPA-1.md](docs/ETAPA-1.md) e o passeio pelo código em [docs/CODIGO.md](docs/CODIGO.md).
+> **O isolamento é parcial — e não é simulado.** As restrições implementadas são aplicadas pelo kernel do Windows: quando o container tenta usar um recurso bloqueado, quem nega é o sistema operacional. O que **não** está isolado, e o motivo técnico de cada caso, está em [Isolamento](#isolamento). Os conceitos estão em [docs/ETAPA-1.md](docs/ETAPA-1.md) e [docs/ETAPA-2.md](docs/ETAPA-2.md), e o passeio pelo código em [docs/CODIGO.md](docs/CODIGO.md).
 
 ## Índice
 
 - [Requisitos](#requisitos)
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
+- [Imagens e o MiniDockerfile](#imagens-e-o-minidockerfile)
 - [Como funciona](#como-funciona)
 - [Isolamento](#isolamento)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -21,7 +22,7 @@ Cada container é um **grupo de processos** criado dentro de um [Job Object](htt
 - Windows — os containers rodam via `cmd.exe /c` dentro de um Job Object
 - .NET 10 SDK
 
-O código compila em qualquer sistema operacional, mas só executa no Windows. Fora do Windows, os testes que dependem do `cmd.exe` e da API de Job Objects são **ignorados** em vez de falharem, o que permite desenvolver em outro sistema — mas a validação real precisa acontecer no Windows.
+O código compila em qualquer sistema operacional, mas só executa containers no Windows. Fora do Windows, os testes que dependem do `cmd.exe` e da API de Job Objects são **ignorados** em vez de falharem; os de imagem, build sem `RUN`, criação e validação rodam em qualquer sistema.
 
 ## Início rápido
 
@@ -29,58 +30,192 @@ O código compila em qualquer sistema operacional, mas só executa no Windows. F
 dotnet build
 dotnet test
 
-dotnet run --project src\MiniDocker.Cli -- run c1 "echo ola"
-dotnet run --project src\MiniDocker.Cli -- ps
-dotnet run --project src\MiniDocker.Cli -- rm c1
+:: um alias para encurtar os exemplos
+doskey minidocker=dotnet run --project src\MiniDocker.Cli -- $*
+
+:: container descartavel, anexado ao terminal
+minidocker run --rm scratch echo ola
 ```
+
+### O gato e o cachorro
+
+Para apresentar, siga o roteiro em [exemplos/README.md](exemplos/README.md): cada passo traz o comando, a saída esperada e o que explicar.
+
+Há dois exemplos, um de cada tipo de container:
+
+| Imagem | Tipo | O que faz |
+|---|---|---|
+| [`exemplos/gato`](exemplos/gato) | **Roda e morre** | Mia uma vez e termina — o container fica `Finalizado (0)`. Como um script, um job, uma migração de banco |
+| [`exemplos/cachorro`](exemplos/cachorro) | **Roda em loop** | Late a cada 2 s até alguém dar `stop`. Como um servidor web, um banco de dados |
+
+```bat
+minidocker build -t gato exemplos\gato
+minidocker run --name mingau gato                :: mia e termina; o terminal fica livre
+minidocker ps -a                                 :: mingau: Finalizado (0)
+```
+
+O cachorro também guarda, **num arquivo dentro do próprio container**, quantas vezes ele já foi iniciado. É isso que mostra que o `start` volta o mesmo container:
+
+```bat
+minidocker build -t cachorro exemplos\cachorro   :: 1. a imagem: o molde
+minidocker run -d --name rex cachorro            :: 2. o container rex nasce da imagem e roda
+minidocker logs rex                              ::    "Rex acordou! ... iniciado 1 vez(es)"
+
+minidocker stop rex                              :: 3. os processos morrem...
+minidocker ps -a                                 ::    ...mas o rex continua existindo: "Parado (137)"
+
+minidocker start rex                             :: 4. o MESMO container volta, sem novo run
+minidocker logs rex                              ::    "... iniciado 2 vez(es)": o arquivo sobreviveu
+
+minidocker run -d --name bidu -e NOME=Bidu cachorro  :: 5. outro container da mesma imagem
+minidocker logs bidu                                 ::    "Bidu acordou! ... iniciado 1 vez(es)"
+
+minidocker rm -f rex bidu                        :: 6. agora sim deixam de existir
+```
+
+Os três conceitos que a demonstração separa:
+
+| | O que é | Analogia |
+|---|---|---|
+| **Imagem** | Molde só-leitura: arquivos + comando padrão | A receita do bolo |
+| **Container** | Uma cópia da imagem com estado próprio (seus arquivos, seu log) | Um bolo feito da receita |
+| **Processo** | O programa rodando dentro do container | O bolo no forno |
+
+E o que cada comando faz com eles:
+
+| Comando | Processos | Arquivos do container | Container |
+|---|---|---|---|
+| `stop` | Morrem | Ficam | Continua existindo, `Parado` |
+| `start` | Nascem de novo, do zero | Os mesmos de antes | O mesmo |
+| `rm` | — | Apagados | Deixa de existir |
+| `run` | Nascem | Cópia nova da imagem | Um container **novo** |
 
 ## Comandos
 
+A sintaxe segue a do Docker. Containers e imagens podem ser referidos pelo nome ou por um prefixo do id.
+
+### Containers
+
 | Comando | O que faz |
 |---|---|
-| `run <nome> <comando>` | Cria o container e executa o comando dentro dele |
-| `ps` | Lista os containers registrados com estado e contabilidade |
-| `stop <nome>` | *Stub nesta entrega* — a execução é síncrona, não há processo em segundo plano |
-| `rm <nome>` | Remove o registro e o diretório do container |
+| `run [opções] IMAGEM [COMANDO]` | Cria e executa. Sem `COMANDO`, usa o `CMD` da imagem |
+| `create [opções] IMAGEM [COMANDO]` | Cria sem executar (estado `Criado`) |
+| `start [-a] CONTAINER...` | Inicia em segundo plano; `-a` anexa ao terminal |
+| `stop CONTAINER...` | Encerra o grupo inteiro (`TerminateJobObject`); código de saída 137 |
+| `restart CONTAINER...` | `stop` + `start` |
+| `rm [-f] CONTAINER...` | Remove registro, rootfs e log; `-f` para antes se estiver rodando |
+| `ps [-a] [-q]` | Lista os em execução; `-a` inclui os parados |
+| `logs [-f] CONTAINER` | Saída do container; `-f` acompanha ao vivo |
+| `exec CONTAINER COMANDO` | Executa mais um processo **dentro do mesmo Job Object** |
+| `stats [CONTAINER...]` | CPU %, pico de memória e processos, lidos ao vivo do Job Object |
+| `inspect NOME...` | Registro completo em JSON (container ou imagem) |
 
-Limites de memória, CPU e número de processos chegam na 2ª entrega.
+Opções de `run`/`create`:
+
+| Opção | Efeito | Mecanismo |
+|---|---|---|
+| `-d` | Segundo plano; imprime o id | Processo shim (ver [Como funciona](#como-funciona)) |
+| `-it` | Interativo, ligado ao terminal (sem log) | Processo herda o console |
+| `--name NOME` | Nome do container; sem ele, um nome é gerado | |
+| `-e CHAVE=valor` | Variável de ambiente; `-e CHAVE` copia a do host | Sobrescreve o `ENV` da imagem |
+| `-m 256m` | Limite de memória | `JOB_OBJECT_LIMIT_PROCESS_MEMORY` / `JOB_MEMORY` |
+| `--cpus 0.5` | Limite de CPU, em núcleos | `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP` |
+| `--pids-limit 10` | Máximo de processos vivos | `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` |
+| `--rm` | Remove o container ao terminar | |
+
+### Imagens
+
+| Comando | O que faz |
+|---|---|
+| `build -t NOME[:TAG] [-f ARQUIVO] [CONTEXTO]` | Constrói a partir do `MiniDockerfile` do contexto |
+| `images [-q]` | Lista as imagens |
+| `rmi IMAGEM...` | Remove imagens |
+| `commit CONTAINER NOME[:TAG]` | Congela o rootfs atual de um container numa imagem |
+| `save -o ARQUIVO.zip IMAGEM` | Exporta para um zip, para levar a outra máquina |
+| `load -i ARQUIVO.zip` | Importa |
+
+A imagem `scratch` é embutida e vazia.
+
+## Imagens e o MiniDockerfile
+
+Uma imagem é um **rootfs base** mais os padrões de execução (`CMD` e `ENV`). Criar um container **copia** o rootfs da imagem para o container: cada container altera a própria cópia sem afetar a imagem nem os vizinhos.
+
+O `MiniDockerfile` é um subconjunto do Dockerfile:
+
+```dockerfile
+FROM scratch                       # ou outra imagem local
+COPY cachorro.bat .                # do contexto de build para o rootfs
+ENV NOME=Rex                       # herdada pelos containers
+RUN echo construida > build.txt    # roda num container de build isolado
+CMD cachorro.bat                   # comando padrão do run
+```
+
+O `RUN` não roda no host: roda num **container temporário**, com o mesmo Job Object, as mesmas restrições e o mesmo ambiente isolado, tendo o rootfs em construção como diretório de trabalho. O que ele gravar ali vira parte da imagem. `COPY` não aceita caminhos que saiam do contexto (`..\`).
+
+O Docker evita a cópia usando **camadas** e um sistema de arquivos de união (overlayfs no Linux, wcifs no Windows): a imagem é só-leitura e cada container ganha uma camada gravável por cima. No MiniDocker as camadas ficam "achatadas" — cada `FROM` e cada container é uma cópia completa. O custo é disco e tempo de criação; o comportamento observável (o container não altera a imagem) é o mesmo.
 
 ## Como funciona
 
 ```text
-run c1 "comando"
+minidocker run -d cachorro
     │
-    ├─ 1. cria o diretório rootfs do container
-    ├─ 2. cria o Job Object e aplica as restrições    ← kernel passa a impor
-    ├─ 3. monta um ambiente mínimo, sem herdar o host
-    ├─ 4. inicia o cmd.exe com WorkingDirectory=rootfs
-    ├─ 5. atribui o processo ao Job Object            ← descendentes herdam
-    ├─ 6. aguarda o término
-    ├─ 7. lê a contabilidade do grupo                 ← sobrevive ao término
-    └─ 8. fecha o Job Object                          ← mata o que sobrou
+    ├─ create: copia o rootfs da imagem, grava o registro (Criado)
+    │
+    └─ lança o shim em segundo plano e sai ─────────┐
+                                                    ▼
+                          minidocker __shim <nome>   (dono do container)
+                              ├─ 1. cria o Job Object com nome    ← trava: um start por vez
+                              ├─ 2. aplica restrições e limites   ← kernel passa a impor
+                              ├─ 3. marca Executando
+                              ├─ 4. inicia o cmd.exe no rootfs, com ambiente mínimo
+                              ├─ 5. atribui o processo ao job     ← descendentes herdam
+                              ├─ 6. grava stdout/stderr no log
+                              ├─ 7. processo principal termina    ← encerra os netos
+                              ├─ 8. lê a contabilidade do grupo
+                              └─ 9. marca Finalizado (ou Parado, se foi um stop)
 ```
 
-O passo 5 é o que transforma um processo solto em container: a partir dele, **todo processo criado pelo comando nasce dentro do mesmo Job Object** e herda as mesmas restrições. Nenhum neto escapa.
+O **shim** cumpre o papel do `containerd-shim` do Docker: é ele, e não o CLI, que segura o Job Object, então o terminal pode ser fechado sem matar o container. No modo anexado (sem `-d`), o próprio CLI é o dono, e Ctrl+C equivale a `stop`.
 
-O passo 7 só é confiável por causa de uma propriedade do Job Object: a contabilidade **sobrevive ao término dos processos**. Ler `Process.WorkingSet64` exigiria pegar o processo ainda vivo, o que é uma corrida contra comandos rápidos.
+O Job Object recebe um **nome** no namespace da sessão (`Local\MiniDocker-<id>`). É assim que outros processos encontram o container:
+
+| Comando | O que faz com o nome |
+|---|---|
+| `stop` | `OpenJobObject` + `TerminateJobObject` — mata o grupo inteiro de uma vez |
+| `exec` | `OpenJobObject` + `AssignProcessToJobObject` — o processo novo herda limites e restrições |
+| `stats` | `OpenJobObject` + `QueryInformationJobObject` — contabilidade ao vivo |
+| `ps` | Se o registro diz `Executando` mas o nome não existe mais no kernel, o dono morreu: o registro é corrigido |
 
 ### Estados
 
-`Criado` → `Executando` → `Finalizado`
+```text
+           start                  processo termina sozinho
+ Criado ─────────► Executando ────────────────────────────► Finalizado
+                     │   ▲                                      │
+                stop │   │ start / restart                      │
+                     ▼   │                                      │
+                   Parado ◄─────────────────────────────────────┘ (start também vale daqui)
+```
+
+Qualquer estado aceita `rm`, menos `Executando`, que exige `rm -f`.
 
 ### Dados persistidos
 
-Ficam em `%USERPROFILE%\.minidocker\containers.json`, e o rootfs de cada container em `%USERPROFILE%\.minidocker\containers\<nome>`.
+Em `%USERPROFILE%\.minidocker\`:
 
-Cada registro funciona como um PCB simplificado: PID, estado, código de saída e a contabilidade do grupo — pico de memória, tempo de CPU, total de processos criados e falhas de página.
+| Caminho | Conteúdo |
+|---|---|
+| `containers.json` | Registro de cada container — um PCB simplificado |
+| `containers\<nome>\` | Rootfs de cada container |
+| `logs\<id>.log` | Saída de cada container; acumula entre restarts |
+| `images.json` | Registro das imagens |
+| `images\<id>\rootfs\` | Rootfs de cada imagem |
+
+O CLI e os shims gravam no mesmo JSON ao mesmo tempo. A exclusão mútua entre processos é feita com um arquivo de trava aberto com `FileShare.None`, e cada gravação lê o registro mais recente antes de alterar.
 
 ## Isolamento
 
-Esta é a parte central do trabalho, então vale ser preciso sobre onde está a fronteira.
-
 ### Imposto pelo kernel
-
-Tudo abaixo é aplicado pelo Windows. O container recebe acesso negado ao tentar usar estes recursos — não há verificação em C#.
 
 | Restrição | Efeito |
 |---|---|
@@ -90,15 +225,17 @@ Tudo abaixo é aplicado pelo Windows. O container recebe acesso negado ao tentar
 | `UILIMIT_DESKTOP` | Não cria nem troca de desktop |
 | `UILIMIT_SYSTEMPARAMETERS` / `DISPLAYSETTINGS` | Não altera configurações do sistema |
 | `UILIMIT_EXITWINDOWS` | Não desliga nem reinicia o Windows |
-| Ambiente próprio | Não herda nenhuma variável do host; `TEMP`/`TMP` apontam para o rootfs |
+| Limites de memória, CPU e processos | Ultrapassar faz a alocação ou a criação de processo falhar |
+| Ambiente próprio | Não herda nenhuma variável do host; só entra o que a imagem ou o `-e` definem |
 | `LIMIT_KILL_ON_JOB_CLOSE` | Nenhum processo sobrevive ao fim do container |
 
-### Não implementado — 2ª entrega
+### Não implementado
 
 | Recurso | O que falta |
 |---|---|
-| Sistema de arquivos | Confinar a escrita ao rootfs exige `CreateRestrictedToken` + `CreateProcessAsUser`. Uma ACL sozinha não resolve: sem token restrito, o container roda com a **sua** identidade, então tem os mesmos direitos que você. |
-| Privilégios | Mesmo mecanismo — derrubar privilégios exige o token restrito. |
+| Sistema de arquivos | O rootfs é só o diretório de trabalho: o container ainda lê e escreve fora dele. Confinar a escrita exige um token restrito (`CreateRestrictedToken` ou nível de integridade baixo + `CreateProcessAsUser`). |
+| Privilégios | Mesmo mecanismo. |
+| Imagem com userland própria | O container roda o `cmd.exe` do host. A imagem empacota os **arquivos da aplicação**, não um Windows inteiro. |
 
 ### Fora de alcance
 
@@ -113,28 +250,42 @@ No Linux essa divisão é mais clara: **isolamento** vem de namespaces e **contr
 
 ```bat
 :: o ambiente do host nao entra no container
+:: (o set roda dentro do container; um echo %VAR% seria expandido pelo cmd do host antes)
 set SEGREDO_DO_HOST=senha-123
-minidocker run amb "echo [%SEGREDO_DO_HOST%]"
-:: imprime [%SEGREDO_DO_HOST%] literal, porque a variavel nao existe la dentro
+minidocker run --rm scratch set
+:: SEGREDO_DO_HOST nao aparece
+minidocker run --rm -e SEGREDO_DO_HOST scratch set
+:: agora aparece: entrou porque foi pedido explicitamente
 
-:: nenhum processo sobra: o ping morre junto com o container
-minidocker run orfao "start /b ping -n 100 127.0.0.1"
+:: o stop mata o grupo inteiro, netos inclusive
+minidocker run -d --name orfao scratch "start /b ping -t 127.0.0.1 & ping -t 127.0.0.1"
+minidocker stats orfao
+minidocker stop orfao
+
+:: o exec entra no mesmo grupo e respeita o limite de processos
+minidocker run -d --name lim --pids-limit 2 scratch ping -t 127.0.0.1
+minidocker exec lim ping -n 1 127.0.0.1
+:: falha: o grupo ja tem cmd.exe + ping, o terceiro processo e recusado pelo kernel
 
 :: o que ainda NAO esta isolado, honestamente
-minidocker run sonda "cd & type C:\Windows\System32\drivers\etc\hosts & tasklist & whoami"
+minidocker run --rm scratch "cd & type C:\Windows\System32\drivers\etc\hosts & tasklist & whoami"
 ```
 
 ## Estrutura do projeto
 
 ```text
 src/MiniDocker.Nucleo/
-  Modelos/        Conteiner, EstadoConteiner, LimitesRecursos
+  Modelos/        Conteiner, Imagem, EstadoConteiner, LimitesRecursos, OpcoesConteiner
   Interop/        P/Invoke da API de Job Objects do Windows
-  Repositorios/   Persistência em JSON
-  Servicos/       Ciclo de vida do container
-src/MiniDocker.Cli/      Interface de linha de comando
+  Repositorios/   Persistência em JSON com trava entre processos
+  Servicos/       Ciclo de vida do container, imagens, build, execução
+src/MiniDocker.Cli/      Interface de linha de comando e shim
 tests/MiniDocker.Testes/ Testes unitários
-docs/ETAPA-1.md          Conceitos de SO aplicados nesta entrega
+exemplos/                Contextos de build de exemplo
+docs/ETAPA-1.md          Conceitos: Job Objects, isolamento, contabilidade
+docs/ETAPA-2.md          Conceitos: segundo plano, job com nome, imagens
+docs/ETAPA-3.md          Plano da etapa final
+exemplos/README.md       Roteiro de demonstração passo a passo
 docs/CODIGO.md           Passeio pelo código, arquivo por arquivo
 ```
 
@@ -142,18 +293,7 @@ docs/CODIGO.md           Passeio pelo código, arquivo por arquivo
 
 | Entrega | Situação | O que contém |
 |---|---|---|
-| **1ª — isolamento e ciclo de vida** | Implementada | O container vira um grupo de processos num Job Object, com restrições de interface impostas pelo kernel, tabela de atoms própria, ambiente isolado do host e encerramento sem deixar órfãos. Criação, execução, listagem, remoção e contabilidade do grupo. |
-| **2ª — confinamento e execução em segundo plano** | Planejada | Token restrito (`CreateRestrictedToken` + `CreateProcessAsUser`) confinando a escrita ao rootfs; limites de memória, CPU e número de processos; `stop` real via `TerminateJobObject`; captura de `stdout`/`stderr` em log. |
-| **3ª — imagens reutilizáveis** | Planejada | Um rootfs base copiado para cada novo container. |
-
-## Possíveis melhorias
-
-O que o MiniDocker ainda **não** faz:
-
-- Impedir que o container leia ou escreva arquivos fora da sua pasta
-- Esconder os processos do host
-- Isolar a rede
-- Rodar em segundo plano
-- Guardar logs
-- Usar imagens
-- Aceitar limites de memória, CPU e número de processos pela CLI (o núcleo já suporta)
+| **1ª — isolamento e ciclo de vida** | Implementada | O container vira um grupo de processos num Job Object, com restrições de interface impostas pelo kernel, tabela de atoms própria, ambiente isolado do host e encerramento sem deixar órfãos. |
+| **2ª — execução em segundo plano** | Implementada | Shim dono do container; Job Object com nome; `start`, `stop` real via `TerminateJobObject`, `restart`, `exec`, `logs`, `stats`; limites de memória, CPU e processos na CLI. |
+| **3ª — imagens** | Implementada | `build` com MiniDockerfile (`RUN` em container isolado), `images`, `rmi`, `commit`, `save`/`load`; rootfs copiado da imagem para cada container. |
+| **Final — controle fino e confinamento** | Planejada | Volumes, política de restart, eventos do kernel, criação suspensa e confinamento do sistema de arquivos — detalhes em [docs/ETAPA-3.md](docs/ETAPA-3.md). |

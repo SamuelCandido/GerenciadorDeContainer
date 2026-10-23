@@ -1,0 +1,6 @@
+# Imagem do cachorro. Para construir (na raiz do repositorio):
+#   minidocker build -t cachorro exemplos\cachorro
+FROM scratch
+COPY cachorro.bat .
+ENV NOME=Rex
+CMD cachorro.bat

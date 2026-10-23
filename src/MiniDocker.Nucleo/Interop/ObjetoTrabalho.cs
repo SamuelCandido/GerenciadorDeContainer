@@ -18,25 +18,77 @@ namespace MiniDocker.Nucleo.Interop;
 public sealed class ObjetoTrabalho : IDisposable
 {
     private const long UnidadesPorMilissegundo = 10_000; // intervalos de 100 ns
+    private const int ErroArquivoNaoEncontrado = 2; // ERROR_FILE_NOT_FOUND
     private const int ErroAcessoNegado = 5; // ERROR_ACCESS_DENIED
+    private const int ErroJaExiste = 183; // ERROR_ALREADY_EXISTS
+    private const uint AcessoTotal = 0x1F001F; // JOB_OBJECT_ALL_ACCESS
 
     private readonly SafeJobHandle handle;
 
-    public ObjetoTrabalho(LimitesRecursos limites)
+    /// <summary>
+    /// Cria o Job Object. Com <paramref name="nome"/>, o objeto fica visível
+    /// para outros processos da sessão, e o próprio nome funciona como trava:
+    /// o kernel não deixa existirem dois jobs com o mesmo nome, então o mesmo
+    /// container não pode ser iniciado duas vezes ao mesmo tempo.
+    /// </summary>
+    public ObjetoTrabalho(LimitesRecursos limites, string? nome = null)
     {
         ArgumentNullException.ThrowIfNull(limites);
         limites.Validar();
 
-        handle = NativeMethods.CreateJobObjectW(IntPtr.Zero, null);
+        handle = NativeMethods.CreateJobObjectW(IntPtr.Zero, nome);
         if (handle.IsInvalid)
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 "Nao foi possivel criar o Job Object do container.");
         }
 
+        // CreateJobObject devolve o job existente em vez de falhar, sinalizando
+        // pelo último erro. Usá-lo seria entrar no grupo de outro container.
+        if (nome is not null && Marshal.GetLastWin32Error() == ErroJaExiste)
+        {
+            handle.Dispose();
+            throw new InvalidOperationException("O container ja esta em execucao.");
+        }
+
         AplicarLimitesEstendidos(limites);
         AplicarLimiteCpu(limites);
         AplicarRestricoesUI();
+    }
+
+    private ObjetoTrabalho(SafeJobHandle handle)
+    {
+        this.handle = handle;
+    }
+
+    /// <summary>
+    /// Abre o job de um container em execução. Devolve <c>null</c> quando o nome
+    /// não existe mais no kernel — o que acontece assim que o último handle é
+    /// fechado, ou seja, quando o container terminou ou o processo dono morreu.
+    /// </summary>
+    public static ObjetoTrabalho? Abrir(string nome)
+    {
+        var handle = NativeMethods.OpenJobObjectW(AcessoTotal, false, nome);
+        if (!handle.IsInvalid)
+        {
+            return new ObjetoTrabalho(handle);
+        }
+
+        var erro = Marshal.GetLastWin32Error();
+        handle.Dispose();
+        if (erro == ErroArquivoNaoEncontrado)
+        {
+            return null;
+        }
+
+        throw new Win32Exception(erro, $"Nao foi possivel abrir o Job Object '{nome}'.");
+    }
+
+    /// <summary>O container está vivo enquanto o seu job existir no kernel.</summary>
+    public static bool Existe(string nome)
+    {
+        using var trabalho = Abrir(nome);
+        return trabalho is not null;
     }
 
     /// <summary>
@@ -135,7 +187,8 @@ public sealed class ObjetoTrabalho : IDisposable
             TempoCpuMs: (double)tempoTotal / UnidadesPorMilissegundo,
             PicoMemoriaBytes: (long)limites.PeakJobMemoryUsed,
             TotalProcessos: (int)contabilidade.TotalProcesses,
-            FalhasDePagina: contabilidade.TotalPageFaultCount);
+            FalhasDePagina: contabilidade.TotalPageFaultCount,
+            ProcessosAtivos: (int)contabilidade.ActiveProcesses);
     }
 
     /// <summary>Encerra de uma vez todos os processos do grupo.</summary>
@@ -146,6 +199,17 @@ public sealed class ObjetoTrabalho : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 "Nao foi possivel encerrar o Job Object.");
         }
+    }
+
+    /// <summary>
+    /// Encerra o que sobrou do grupo sem fechar o handle, de modo que o nome do
+    /// job continue reservado até o registro do container ser atualizado.
+    /// </summary>
+    public void EncerrarRestantes()
+    {
+        // Falhar aqui não muda o resultado: o Dispose, com KILL_ON_JOB_CLOSE,
+        // encerra o grupo de qualquer forma.
+        NativeMethods.TerminateJobObject(handle, 1);
     }
 
     public void Dispose() => handle.Dispose();

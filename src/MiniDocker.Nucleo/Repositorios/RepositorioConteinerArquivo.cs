@@ -1,47 +1,27 @@
-using System.Text.Json;
 using MiniDocker.Nucleo.Modelos;
 
 namespace MiniDocker.Nucleo.Repositorios;
 
 public class RepositorioConteinerArquivo : IRepositorioConteiner
 {
-    private readonly string caminhoArquivo;
-    private readonly object sincronizador = new();
-    private readonly JsonSerializerOptions opcoesJson = new() { WriteIndented = true };
+    private readonly ArmazenamentoJson<Conteiner> armazenamento;
 
     public RepositorioConteinerArquivo(string? caminhoBase = null)
     {
-        var baseRepositorio = caminhoBase ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".minidocker");
-        Directory.CreateDirectory(baseRepositorio);
-        caminhoArquivo = Path.Combine(baseRepositorio, "containers.json");
+        armazenamento = new ArmazenamentoJson<Conteiner>(
+            Path.Combine(Workspace.Raiz(caminhoBase), "containers.json"));
     }
 
-    public IReadOnlyList<Conteiner> ObterTodos()
-    {
-        lock (sincronizador)
-        {
-            return Carregar().AsReadOnly();
-        }
-    }
+    public IReadOnlyList<Conteiner> ObterTodos() => armazenamento.Ler().AsReadOnly();
 
-    public Conteiner? ObterPorNome(string nome)
-    {
-        lock (sincronizador)
-        {
-            return Carregar().FirstOrDefault(c =>
-                string.Equals(c.Nome, nome, StringComparison.Ordinal));
-        }
-    }
+    public Conteiner? ObterPorNome(string nome) =>
+        armazenamento.Ler().FirstOrDefault(c => MesmoNome(c, nome));
 
     public void Salvar(Conteiner conteiner)
     {
-        lock (sincronizador)
+        armazenamento.Alterar(conteineres =>
         {
-            var conteineres = Carregar();
-            var indice = conteineres.FindIndex(c =>
-                string.Equals(c.Nome, conteiner.Nome, StringComparison.Ordinal));
-
+            var indice = conteineres.FindIndex(c => MesmoNome(c, conteiner.Nome));
             if (indice >= 0)
             {
                 conteineres[indice] = conteiner;
@@ -51,32 +31,26 @@ public class RepositorioConteinerArquivo : IRepositorioConteiner
                 conteineres.Add(conteiner);
             }
 
-            File.WriteAllText(caminhoArquivo,
-                JsonSerializer.Serialize(conteineres, opcoesJson));
-        }
+            return conteiner;
+        });
+    }
+
+    public Conteiner Atualizar(string nome, Action<Conteiner> alteracao)
+    {
+        return armazenamento.Alterar(conteineres =>
+        {
+            var conteiner = conteineres.FirstOrDefault(c => MesmoNome(c, nome))
+                ?? throw new InvalidOperationException($"Container '{nome}' nao existe.");
+            alteracao(conteiner);
+            return conteiner;
+        });
     }
 
     public void Remover(string nome)
     {
-        lock (sincronizador)
-        {
-            var conteineres = Carregar();
-            conteineres.RemoveAll(c => string.Equals(c.Nome, nome, StringComparison.Ordinal));
-            File.WriteAllText(caminhoArquivo,
-                JsonSerializer.Serialize(conteineres, opcoesJson));
-        }
+        armazenamento.Alterar(conteineres => conteineres.RemoveAll(c => MesmoNome(c, nome)));
     }
 
-    private List<Conteiner> Carregar()
-    {
-        if (!File.Exists(caminhoArquivo))
-        {
-            return [];
-        }
-
-        var conteudo = File.ReadAllText(caminhoArquivo);
-        return string.IsNullOrWhiteSpace(conteudo)
-            ? []
-            : JsonSerializer.Deserialize<List<Conteiner>>(conteudo) ?? [];
-    }
+    private static bool MesmoNome(Conteiner conteiner, string nome) =>
+        string.Equals(conteiner.Nome, nome, StringComparison.Ordinal);
 }

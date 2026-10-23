@@ -149,6 +149,17 @@ internal static class NativeMethods
     [DllImport(Kernel32, CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern SafeJobHandle CreateJobObjectW(IntPtr atributos, string? nome);
 
+    /// <summary>
+    /// Abre um Job Object existente pelo nome. É o que permite a outro processo
+    /// — o <c>stop</c>, o <c>exec</c>, o <c>stats</c> — alcançar o grupo criado
+    /// pelo processo dono do container.
+    /// </summary>
+    [DllImport(Kernel32, CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern SafeJobHandle OpenJobObjectW(
+        uint acessoDesejado,
+        [MarshalAs(UnmanagedType.Bool)] bool herdarHandle,
+        string nome);
+
     [DllImport(Kernel32, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool AssignProcessToJobObject(SafeJobHandle trabalho, IntPtr processo);

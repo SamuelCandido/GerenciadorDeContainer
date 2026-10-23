@@ -1,0 +1,9 @@
+# Imagem do gato: roda uma vez e termina. Para construir (na raiz do repositorio):
+#   minidocker build -t gato exemplos\gato
+FROM scratch
+COPY gato.bat .
+ENV NOME=Mingau
+# O RUN executa AGORA, durante o build, e o arquivo gerado passa a fazer
+# parte da imagem. Todo container criado dela ja nasce com ele.
+RUN echo %DATE% %TIME:~0,8% > construida_em.txt
+CMD gato.bat

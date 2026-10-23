@@ -2,6 +2,8 @@
 
 Explicação arquivo por arquivo do MiniDocker. Este documento cobre **o código**; os conceitos de Sistemas Operacionais por trás dele estão em [ETAPA-1.md](ETAPA-1.md).
 
+> **Desatualizado em parte.** Este passeio descreve o fluxo síncrono da Etapa 1. Na Etapa 2, `ServicoConteiner.Executar` virou `Criar` + `Iniciar`, a execução do processo foi para `Servicos/ExecutorProcesso.cs`, a persistência ganhou trava entre processos (`Repositorios/ArmazenamentoJson.cs`) e surgiram as imagens (`Modelos/Imagem.cs`, `Servicos/ServicoImagem.cs`, `Servicos/ArquivoBuild.cs`). Os conceitos novos estão em [ETAPA-2.md](ETAPA-2.md).
+
 ## 1. Arquitetura em camadas
 
 ```text

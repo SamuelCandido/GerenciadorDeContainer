@@ -1,37 +1,52 @@
-using System.Diagnostics;
+using System.Text.RegularExpressions;
 using MiniDocker.Nucleo.Interop;
 using MiniDocker.Nucleo.Modelos;
 using MiniDocker.Nucleo.Repositorios;
 
 namespace MiniDocker.Nucleo.Servicos;
 
-public class ServicoConteiner : IServicoConteiner
+public partial class ServicoConteiner : IServicoConteiner
 {
+    /// <summary>Código de saída de um container parado, o mesmo do Docker (128 + SIGKILL).</summary>
+    public const int CodigoSaidaParado = 137;
+
+    private static readonly TimeSpan EsperaMaximaParada = TimeSpan.FromSeconds(10);
+
     private readonly IRepositorioConteiner repositorio;
+    private readonly IServicoImagem imagens;
     private readonly string raizWorkspace;
 
     public ServicoConteiner(string? raizWorkspace = null)
-        : this(new RepositorioConteinerArquivo(raizWorkspace), raizWorkspace)
+        : this(new RepositorioConteinerArquivo(raizWorkspace), new ServicoImagem(raizWorkspace), raizWorkspace)
     {
     }
 
-    public ServicoConteiner(IRepositorioConteiner repositorio, string? raizWorkspace = null)
+    public ServicoConteiner(IRepositorioConteiner repositorio, IServicoImagem imagens, string? raizWorkspace = null)
     {
         this.repositorio = repositorio;
-        this.raizWorkspace = raizWorkspace ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".minidocker");
+        this.imagens = imagens;
+        this.raizWorkspace = Workspace.Raiz(raizWorkspace);
         Directory.CreateDirectory(Path.Combine(this.raizWorkspace, "containers"));
+        Directory.CreateDirectory(Path.Combine(this.raizWorkspace, "logs"));
     }
 
-    public Conteiner Executar(string nome, string comando, LimitesRecursos? limites = null)
+    public Conteiner Criar(string? nome, string imagem, string? comando = null, OpcoesConteiner? opcoes = null)
     {
-        ValidarTexto(nome, nameof(nome));
-        ValidarTexto(comando, nameof(comando));
+        opcoes ??= OpcoesConteiner.Padrao;
 
-        // Validado antes de criar diretório ou registro, para que um limite
-        // inválido não deixe um container pela metade no repositório.
-        limites ??= LimitesRecursos.Nenhum;
-        limites.Validar();
+        // Tudo validado antes de criar diretório ou registro, para que um erro
+        // não deixe um container pela metade no repositório.
+        nome ??= GerarNome();
+        ValidarNome(nome);
+        opcoes.Limites.Validar();
+        var origem = imagens.Obter(imagem);
+
+        comando = string.IsNullOrWhiteSpace(comando) ? origem.Comando : comando;
+        if (string.IsNullOrWhiteSpace(comando))
+        {
+            throw new ArgumentException(
+                $"Nenhum comando informado e a imagem '{origem.Referencia}' nao define CMD.", nameof(comando));
+        }
 
         if (repositorio.ObterPorNome(nome) is not null)
         {
@@ -39,126 +54,336 @@ public class ServicoConteiner : IServicoConteiner
         }
 
         var caminhoRootFs = Path.Combine(raizWorkspace, "containers", nome);
-        Directory.CreateDirectory(caminhoRootFs);
+        Workspace.ApagarDiretorio(caminhoRootFs);
+        if (origem.EhScratch)
+        {
+            Directory.CreateDirectory(caminhoRootFs);
+        }
+        else
+        {
+            // Cópia, não referência: o container altera o próprio rootfs sem
+            // tocar na imagem nem nos outros containers criados dela.
+            Workspace.CopiarDiretorio(origem.CaminhoRootFs, caminhoRootFs);
+        }
+
+        var ambiente = new Dictionary<string, string>(origem.Ambiente);
+        foreach (var (chave, valor) in opcoes.Ambiente)
+        {
+            ambiente[chave] = valor;
+        }
 
         var conteiner = new Conteiner
         {
             Nome = nome,
+            Imagem = origem.Referencia,
             Comando = comando,
+            Ambiente = ambiente,
             CaminhoRootFs = caminhoRootFs,
-            Limites = limites
+            Limites = opcoes.Limites,
+            RemoverAoFinalizar = opcoes.RemoverAoFinalizar
         };
         repositorio.Salvar(conteiner);
+        return conteiner;
+    }
 
-        try
+    public Conteiner Iniciar(string nomeOuId, Action<string>? saida = null, bool interativo = false)
+    {
+        var conteiner = Obter(nomeOuId);
+        if (conteiner.Estado == EstadoConteiner.Executando)
         {
-            // O Job Object nasce antes do processo: assim que o processo é atribuído
-            // ao grupo, todo descendente dele já nasce sujeito aos mesmos limites.
-            using var trabalho = new ObjetoTrabalho(limites);
-            using var processo = CriarProcesso(comando, caminhoRootFs);
-
-            conteiner.IniciadoEm = DateTime.UtcNow;
-            conteiner.Estado = EstadoConteiner.Executando;
-            processo.Start();
-            conteiner.IdProcesso = processo.Id;
-            var noGrupo = trabalho.Atribuir(processo);
-            repositorio.Salvar(conteiner);
-
-            processo.WaitForExit();
-
-            // A contabilidade do Job Object sobrevive ao fim dos processos, então a
-            // leitura não corre contra o término: os números cobrem o grupo inteiro,
-            // inclusive os netos que o comando tenha criado.
-            var contabilidade = noGrupo
-                ? trabalho.Contabilizar()
-                : new ContabilidadeTrabalho(0, 0, 0, 0);
-            conteiner.MemoriaUsadaBytes = contabilidade.PicoMemoriaBytes;
-            conteiner.TempoCpuMs = contabilidade.TempoCpuMs;
-            conteiner.TotalProcessos = contabilidade.TotalProcessos;
-            conteiner.FalhasDePagina = contabilidade.FalhasDePagina;
-            conteiner.CodigoSaida = processo.ExitCode;
+            throw new InvalidOperationException($"O container '{conteiner.Nome}' ja esta em execucao.");
         }
-        finally
+
+        int? codigoSaida = null;
+        ContabilidadeTrabalho? contabilidade = null;
+
+        // O Job Object nasce antes de o registro dizer "Executando". Assim,
+        // quem vir Executando sempre encontra o job no kernel — e, se não
+        // encontrar, sabe que o dono morreu. O nome do job também impede dois
+        // starts simultâneos do mesmo container.
+        using (var trabalho = new ObjetoTrabalho(conteiner.Limites, conteiner.NomeTrabalho))
         {
-            // Mesmo se a execução falhar no meio, o registro não pode ficar preso
-            // em Executando: o using já encerrou o grupo, e um container nesse
-            // estado nunca mais poderia ser removido. CodigoSaida nulo indica falha.
-            conteiner.FinalizadoEm = DateTime.UtcNow;
-            conteiner.Estado = EstadoConteiner.Finalizado;
-            repositorio.Salvar(conteiner);
+            conteiner = repositorio.Atualizar(conteiner.Nome, c =>
+            {
+                c.Estado = EstadoConteiner.Executando;
+                c.IniciadoEm = DateTime.UtcNow;
+                c.FinalizadoEm = null;
+                c.CodigoSaida = null;
+                c.IdProcesso = null;
+                c.ParadaSolicitada = false;
+            });
+
+            using var log = interativo ? null : AbrirLog(conteiner);
+            try
+            {
+                Action<string>? encaminhar = log is null ? null : linha =>
+                {
+                    log.WriteLine(linha);
+                    saida?.Invoke(linha);
+                };
+
+                var resultado = ExecutorProcesso.Executar(
+                    trabalho, conteiner.Comando, conteiner.CaminhoRootFs, conteiner.Ambiente, encaminhar,
+                    aoIniciar: pid => repositorio.Atualizar(conteiner.Nome, c => c.IdProcesso = pid));
+
+                codigoSaida = resultado.CodigoSaida;
+                contabilidade = resultado.Contabilidade;
+            }
+            catch (Exception excecao)
+            {
+                log?.WriteLine($"[minidocker] erro ao executar: {excecao.Message}");
+                throw;
+            }
+            finally
+            {
+                // Mesmo se a execução falhar no meio, o registro não pode ficar
+                // preso em Executando. CodigoSaida nulo indica falha. Isto roda
+                // com o job ainda aberto, então ninguém observa um meio-termo.
+                conteiner = repositorio.Atualizar(conteiner.Nome, c =>
+                {
+                    c.Estado = c.ParadaSolicitada ? EstadoConteiner.Parado : EstadoConteiner.Finalizado;
+                    c.FinalizadoEm = DateTime.UtcNow;
+                    c.CodigoSaida = codigoSaida;
+                    if (contabilidade is not null)
+                    {
+                        c.MemoriaUsadaBytes = contabilidade.PicoMemoriaBytes;
+                        c.TempoCpuMs = contabilidade.TempoCpuMs;
+                        c.TotalProcessos = contabilidade.TotalProcessos;
+                        c.FalhasDePagina = contabilidade.FalhasDePagina;
+                    }
+                });
+            }
+        }
+
+        if (conteiner.RemoverAoFinalizar)
+        {
+            Remover(conteiner.Nome);
         }
 
         return conteiner;
     }
 
-    public IReadOnlyList<Conteiner> Listar() => repositorio.ObterTodos();
-
-    public void Parar(string nome)
+    public Conteiner Executar(string? nome, string imagem, string? comando = null,
+        OpcoesConteiner? opcoes = null, Action<string>? saida = null)
     {
-        if (repositorio.ObterPorNome(nome) is null)
-        {
-            throw new InvalidOperationException($"Container '{nome}' nao existe.");
-        }
-
-        throw new InvalidOperationException(
-            "Nao ha processo em execucao para parar neste prototipo sincronio.");
+        var conteiner = Criar(nome, imagem, comando, opcoes);
+        return Iniciar(conteiner.Nome, saida);
     }
 
-    public void Remover(string nome)
+    public Conteiner Obter(string nomeOuId)
     {
-        var conteiner = repositorio.ObterPorNome(nome)
-            ?? throw new InvalidOperationException($"Container '{nome}' nao existe.");
+        var todos = repositorio.ObterTodos();
+        var conteiner = todos.FirstOrDefault(c => c.Nome == nomeOuId);
+
+        if (conteiner is null)
+        {
+            var porId = todos
+                .Where(c => c.Id.StartsWith(nomeOuId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            conteiner = porId.Count switch
+            {
+                1 => porId[0],
+                0 => throw new InvalidOperationException($"Container '{nomeOuId}' nao existe."),
+                _ => throw new InvalidOperationException(
+                    $"O prefixo '{nomeOuId}' corresponde a mais de um container.")
+            };
+        }
+
+        return Reconciliar(conteiner);
+    }
+
+    public IReadOnlyList<Conteiner> Listar() =>
+        repositorio.ObterTodos().Select(Reconciliar).ToList();
+
+    public Conteiner Parar(string nomeOuId)
+    {
+        var conteiner = Obter(nomeOuId);
+        if (conteiner.Estado != EstadoConteiner.Executando)
+        {
+            throw new InvalidOperationException($"O container '{conteiner.Nome}' nao esta em execucao.");
+        }
+
+        // A marca vem antes do TerminateJobObject: quando o processo principal
+        // morrer, o dono já vai ler que foi um stop, e não um término normal.
+        repositorio.Atualizar(conteiner.Nome, c => c.ParadaSolicitada = true);
+
+        using (var trabalho = ObjetoTrabalho.Abrir(conteiner.NomeTrabalho))
+        {
+            trabalho?.Encerrar(CodigoSaidaParado);
+        }
+
+        // O registro final é escrito pelo dono, em outro processo. Espera por
+        // ele como o docker stop espera o container sair.
+        var limite = DateTime.UtcNow + EsperaMaximaParada;
+        while (DateTime.UtcNow < limite)
+        {
+            if (repositorio.ObterPorNome(conteiner.Nome) is not { } atual)
+            {
+                // Container com --rm: o dono já o removeu ao terminar.
+                conteiner.Estado = EstadoConteiner.Parado;
+                conteiner.CodigoSaida = CodigoSaidaParado;
+                return conteiner;
+            }
+
+            conteiner = Reconciliar(atual);
+            if (conteiner.Estado != EstadoConteiner.Executando)
+            {
+                return conteiner;
+            }
+
+            Thread.Sleep(50);
+        }
+
+        throw new TimeoutException($"O container '{conteiner.Nome}' nao terminou a tempo.");
+    }
+
+    public void Remover(string nomeOuId, bool forcar = false)
+    {
+        var conteiner = Obter(nomeOuId);
 
         if (conteiner.Estado == EstadoConteiner.Executando)
         {
-            throw new InvalidOperationException("Nao e possivel remover um container em execucao.");
+            if (!forcar)
+            {
+                throw new InvalidOperationException(
+                    $"O container '{conteiner.Nome}' esta em execucao. Pare-o antes ou use rm -f.");
+            }
+
+            // Um --rm faria o dono remover sozinho ao terminar; aqui a remoção
+            // é explícita, então o dono não deve tentar de novo.
+            repositorio.Atualizar(conteiner.Nome, c => c.RemoverAoFinalizar = false);
+            Parar(conteiner.Nome);
         }
 
-        repositorio.Remover(nome);
-        if (Directory.Exists(conteiner.CaminhoRootFs))
-        {
-            Directory.Delete(conteiner.CaminhoRootFs, recursive: true);
-        }
+        repositorio.Remover(conteiner.Nome);
+        Workspace.ApagarDiretorio(conteiner.CaminhoRootFs);
+        File.Delete(CaminhoLog(conteiner));
     }
 
-    private static void ValidarTexto(string valor, string nomeParametro)
+    public int ExecutarNoConteiner(string nomeOuId, string comando)
     {
-        if (string.IsNullOrWhiteSpace(valor))
+        var conteiner = Obter(nomeOuId);
+        if (string.IsNullOrWhiteSpace(comando))
         {
-            throw new ArgumentException("O valor nao pode ser vazio.", nomeParametro);
+            throw new ArgumentException("O comando nao pode ser vazio.", nameof(comando));
         }
+
+        using var trabalho = AbrirTrabalho(conteiner);
+
+        // Entra no mesmo Job Object: herda os limites, as restrições de
+        // interface e é encerrado junto com o container.
+        return ExecutorProcesso.ExecutarAnexado(trabalho, comando, conteiner.CaminhoRootFs, conteiner.Ambiente);
     }
 
-    private static Process CriarProcesso(string comando, string caminhoRootFs)
+    public ContabilidadeTrabalho Estatisticas(string nomeOuId)
     {
-        var informacoes = new ProcessStartInfo
+        var conteiner = Obter(nomeOuId);
+        using var trabalho = AbrirTrabalho(conteiner);
+        return trabalho.Contabilizar();
+    }
+
+    public void LerLogs(string nomeOuId, bool seguir, Action<string> saida, CancellationToken cancelamento = default)
+    {
+        var conteiner = Obter(nomeOuId);
+        var caminho = CaminhoLog(conteiner);
+        if (!File.Exists(caminho))
         {
-            FileName = "cmd.exe",
-            WorkingDirectory = caminhoRootFs,
-            UseShellExecute = false
-        };
-        informacoes.ArgumentList.Add("/c");
-        informacoes.ArgumentList.Add(comando);
-        IsolarAmbiente(informacoes, caminhoRootFs);
-        return new Process { StartInfo = informacoes };
+            return;
+        }
+
+        using var fluxo = new FileStream(caminho, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var leitor = new StreamReader(fluxo);
+
+        while (true)
+        {
+            // O estado é lido antes de esvaziar o arquivo: se o container já
+            // tinha terminado, tudo o que ele escreveu já está no log.
+            var rodando = seguir && Obter(conteiner.Nome).Estado == EstadoConteiner.Executando;
+
+            while (leitor.ReadLine() is { } linha)
+            {
+                saida(linha);
+            }
+
+            if (!rodando || cancelamento.WaitHandle.WaitOne(200))
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>
-    /// Substitui o ambiente herdado do processo pai por um conjunto mínimo. Sem
-    /// isto, toda variável do host — inclusive credenciais e caminhos pessoais —
-    /// entraria no container. As variáveis de temporário apontam para o rootfs,
-    /// então arquivos temporários do container ficam dentro dele.
+    /// Corrige um registro que diz Executando mas cujo Job Object não existe
+    /// mais — o processo dono morreu sem gravar o fim (foi morto, a máquina
+    /// caiu). Com KILL_ON_JOB_CLOSE, o grupo morreu junto com ele.
     /// </summary>
-    private static void IsolarAmbiente(ProcessStartInfo informacoes, string caminhoRootFs)
+    private Conteiner Reconciliar(Conteiner conteiner)
     {
-        var raizWindows = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+        if (conteiner.Estado != EstadoConteiner.Executando || ObjetoTrabalho.Existe(conteiner.NomeTrabalho))
+        {
+            return conteiner;
+        }
 
-        informacoes.Environment.Clear();
-        informacoes.Environment["SystemRoot"] = raizWindows;
-        informacoes.Environment["ComSpec"] = Path.Combine(raizWindows, "system32", "cmd.exe");
-        informacoes.Environment["Path"] =
-            $"{Path.Combine(raizWindows, "system32")};{raizWindows}";
-        informacoes.Environment["TEMP"] = caminhoRootFs;
-        informacoes.Environment["TMP"] = caminhoRootFs;
+        return repositorio.Atualizar(conteiner.Nome, c =>
+        {
+            // Reconfere dentro da trava: o dono pode ter acabado de gravar.
+            if (c.Estado == EstadoConteiner.Executando)
+            {
+                c.Estado = c.ParadaSolicitada ? EstadoConteiner.Parado : EstadoConteiner.Finalizado;
+                c.FinalizadoEm = DateTime.UtcNow;
+            }
+        });
     }
+
+    private static ObjetoTrabalho AbrirTrabalho(Conteiner conteiner) =>
+        (conteiner.Estado == EstadoConteiner.Executando ? ObjetoTrabalho.Abrir(conteiner.NomeTrabalho) : null)
+            ?? throw new InvalidOperationException($"O container '{conteiner.Nome}' nao esta em execucao.");
+
+    private StreamWriter AbrirLog(Conteiner conteiner)
+    {
+        // Append, como o Docker: um restart continua o mesmo log.
+        var fluxo = new FileStream(CaminhoLog(conteiner), FileMode.Append, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        return new StreamWriter(fluxo) { AutoFlush = true };
+    }
+
+    private string CaminhoLog(Conteiner conteiner) =>
+        Path.Combine(raizWorkspace, "logs", $"{conteiner.Id}.log");
+
+    /// <summary>
+    /// O nome vira nome de diretório, então precisa ser restrito: sem isso um
+    /// nome como <c>..\..\Windows</c> faria o rootfs, e o rm, sair do workspace.
+    /// </summary>
+    private static void ValidarNome(string nome)
+    {
+        if (!PadraoNome().IsMatch(nome))
+        {
+            throw new ArgumentException(
+                $"Nome de container invalido: '{nome}'. Use letras, digitos, '_', '.' ou '-'.", nameof(nome));
+        }
+    }
+
+    private string GerarNome()
+    {
+        string[] adjetivos = ["agil", "bravo", "calmo", "curioso", "esperto", "feliz", "gentil", "sereno", "veloz", "zen"];
+        string[] cientistas = ["dijkstra", "hopper", "knuth", "lamport", "liskov", "lovelace", "ritchie", "tanenbaum", "thompson", "turing"];
+
+        for (var tentativa = 0; ; tentativa++)
+        {
+            var nome = $"{adjetivos[Random.Shared.Next(adjetivos.Length)]}_{cientistas[Random.Shared.Next(cientistas.Length)]}";
+            if (tentativa >= 20)
+            {
+                nome += Random.Shared.Next(100);
+            }
+
+            if (repositorio.ObterPorNome(nome) is null)
+            {
+                return nome;
+            }
+        }
+    }
+
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")]
+    private static partial Regex PadraoNome();
 }

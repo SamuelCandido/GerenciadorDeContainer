@@ -46,9 +46,13 @@ public sealed record LimitesRecursos
     }
 }
 
-/// <summary>Consumo real do grupo, lido do Job Object depois que ele termina.</summary>
+/// <summary>
+/// Consumo real do grupo, lido do Job Object. Pode ser lido com o container
+/// vivo (<c>stats</c>) ou depois que ele termina.
+/// </summary>
 public sealed record ContabilidadeTrabalho(
     double TempoCpuMs,
     long PicoMemoriaBytes,
     int TotalProcessos,
-    long FalhasDePagina);
+    long FalhasDePagina,
+    int ProcessosAtivos = 0);

@@ -12,6 +12,7 @@ Cada container é um **grupo de processos** criado dentro de um [Job Object](htt
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
 - [Imagens e o MiniDockerfile](#imagens-e-o-minidockerfile)
+- [Imagens Linux: alpine, ubuntu](#imagens-linux-alpine-ubuntu)
 - [Como funciona](#como-funciona)
 - [Isolamento](#isolamento)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -19,10 +20,15 @@ Cada container é um **grupo de processos** criado dentro de um [Job Object](htt
 
 ## Requisitos
 
-- Windows — os containers rodam via `cmd.exe /c` dentro de um Job Object
 - .NET 10 SDK
+- E, conforme o tipo de imagem:
 
-O código compila em qualquer sistema operacional, mas só executa containers no Windows. Fora do Windows, os testes que dependem do `cmd.exe` e da API de Job Objects são **ignorados** em vez de falharem; os de imagem, build sem `RUN`, criação e validação rodam em qualquer sistema.
+| Imagem | Host Windows | Host Linux |
+|---|---|---|
+| **Windows** (`scratch`, `build`) | ✔ `cmd.exe` num Job Object | ✘ |
+| **Linux** (`alpine`, `ubuntu`… via `pull`) | ✔ com WSL2 instalado | ✔ namespaces + `chroot`, sem sudo |
+
+Os testes que dependem de uma plataforma são **ignorados** na outra, em vez de falharem. Os testes do runtime Linux baixam o `alpine` do Docker Hub, então precisam de internet.
 
 ## Início rápido
 
@@ -154,6 +160,46 @@ O `RUN` não roda no host: roda num **container temporário**, com o mesmo Job O
 
 O Docker evita a cópia usando **camadas** e um sistema de arquivos de união (overlayfs no Linux, wcifs no Windows): a imagem é só-leitura e cada container ganha uma camada gravável por cima. No MiniDocker as camadas ficam "achatadas" — cada `FROM` e cada container é uma cópia completa. O custo é disco e tempo de criação; o comportamento observável (o container não altera a imagem) é o mesmo.
 
+## Imagens Linux: alpine, ubuntu
+
+```bat
+minidocker pull alpine                 :: baixa do Docker Hub
+minidocker run alpine cat /etc/os-release
+minidocker run -d --name web alpine sh -c "while true; do date; sleep 2; done"
+minidocker exec web ps                 :: so os processos do container
+minidocker stop web & minidocker start web & minidocker rm -f web
+```
+
+O `run` de uma imagem que não existe localmente baixa sozinho, como no Docker. Funcionam alpine, ubuntu, debian, busybox e outras imagens do Docker Hub.
+
+### Um container não tem kernel próprio
+
+Uma imagem Linux traz programas que fazem **chamadas de sistema do Linux**. Como o container usa o kernel do host, quem roda essa imagem precisa de um kernel Linux por baixo:
+
+| Host | Como o MiniDocker roda uma imagem Linux | Isolamento |
+|---|---|---|
+| **Linux** | Direto no kernel do host, com `unshare` + `chroot` | **Namespaces de verdade**: o container vê só os próprios processos (PID 1 é dele), tem hostname, `/proc` e montagens próprios, e é "root" sem ser root no host |
+| **Windows** | Numa distro do **WSL2**, uma VM leve com kernel Linux — o mesmo que o Docker Desktop faz | O da VM |
+
+No Linux, o paralelo com o Windows é direto:
+
+| | Windows | Linux |
+|---|---|---|
+| Grupo de processos | Job Object | Namespace de PID |
+| Matar o grupo inteiro | `TerminateJobObject` | `SIGKILL` no init — o kernel derruba o namespace |
+| Nada sobra quando o dono morre | `KILL_ON_JOB_CLOSE` | `unshare --kill-child` |
+| Saber se o container está vivo | O nome do Job Object existe | O processo dono segura uma trava de arquivo |
+| Entrar no container (`exec`) | `AssignProcessToJobObject` | `nsenter` nos mesmos namespaces |
+| Ver só os próprios processos | ✘ (exigiria Server Silos) | ✔ |
+| Limites e `stats` | ✔ | ✘ — seria cgroups, deixado de fora |
+
+### O que ficou reduzido
+
+- Limites (`-m`, `--cpus`, `--pids-limit`) e `stats` só para imagens Windows.
+- `build`, `commit` e `save` só para imagens Windows; imagens Linux vêm do `pull`.
+- As camadas da imagem são juntadas num `.tar` só; arquivos que uma camada de cima apaga (`.wh.*`) são ignorados.
+- Sem rede própria: o container usa a rede do host.
+
 ## Como funciona
 
 ```text
@@ -241,7 +287,7 @@ O CLI e os shims gravam no mesmo JSON ao mesmo tempo. A exclusão mútua entre p
 
 | Recurso | Por quê |
 |---|---|
-| Namespace de processos | O container enxerga o host via `tasklist`. Filtrar isso exige **Server Silos**, APIs não documentadas usadas pelo Host Compute System — seria embrulhar o runtime da Microsoft em vez de construir o próprio. |
+| Namespace de processos (containers Windows) | O container enxerga o host via `tasklist`. Filtrar isso exige **Server Silos**, APIs não documentadas usadas pelo Host Compute System — seria embrulhar o runtime da Microsoft em vez de construir o próprio. |
 | Rede | Mesma pilha e mesmas portas do host, pelo mesmo motivo. |
 
 No Linux essa divisão é mais clara: **isolamento** vem de namespaces e **controle de recursos** vem de cgroups. O Job Object do Windows corresponde aos cgroups e cobre só uma parte dos namespaces — a do subsistema de janelas.
@@ -276,9 +322,10 @@ minidocker run --rm scratch "cd & type C:\Windows\System32\drivers\etc\hosts & t
 ```text
 src/MiniDocker.Nucleo/
   Modelos/        Conteiner, Imagem, EstadoConteiner, LimitesRecursos, OpcoesConteiner
-  Interop/        P/Invoke da API de Job Objects do Windows
+  Interop/        Grupo de processos: Job Object (Windows) e namespace de PID (Linux)
   Repositorios/   Persistência em JSON com trava entre processos
-  Servicos/       Ciclo de vida do container, imagens, build, execução
+  Servicos/       Ciclo de vida do container, imagens, build, pull
+    Runtimes/     Como executar cada plataforma: Windows, Linux, WSL2
 src/MiniDocker.Cli/      Interface de linha de comando e shim
 tests/MiniDocker.Testes/ Testes unitários
 exemplos/                Contextos de build de exemplo

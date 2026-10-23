@@ -209,3 +209,32 @@ gato          latest   3f9a1c2b7d10   ha 4 min  412 B
 | `stop` | Morrem | Ficam | Continua existindo (`Parado`) |
 | `start` | Nascem de novo, do zero | Os mesmos de antes | O mesmo |
 | `rm` | — | Apagados | Deixa de existir |
+
+## Bônus: o mesmo roteiro com uma imagem Linux
+
+Num Linux, ou num Windows com WSL2, dá para fazer os mesmos passos com uma imagem baixada do Docker Hub. O que mais chama atenção é o `ps`: **o container só enxerga os próprios processos**.
+
+```bash
+minidocker run --name gato-linux alpine sh -c 'echo "miau de $(hostname)"; ps'
+```
+
+```text
+Imagem 'alpine' nao encontrada localmente.
+Baixando alpine:latest do Docker Hub
+Camada 7b229517ed22: 3,7 MB
+miau de gato-linux
+PID   USER     TIME  COMMAND
+    1 root      0:00 ...
+    7 root      0:00 ps
+```
+
+```bash
+minidocker run -d --name rex-linux alpine sh -c 'echo x >> /vezes; echo "iniciado $(wc -l < /vezes) vez(es)"; i=0; while true; do i=$((i+1)); echo "au au $i"; sleep 2; done'
+minidocker stop rex-linux
+minidocker start rex-linux
+minidocker logs rex-linux          # ... "iniciado 2 vez(es)": o mesmo container voltou
+minidocker exec rex-linux ps       # o exec entra nos namespaces do container
+minidocker rm -f gato-linux rex-linux
+```
+
+**O que explicar:** no Linux, o MiniDocker usa **namespaces** (`unshare`) e **`chroot`** — o mesmo mecanismo do Docker. O container tem PID 1 próprio, hostname próprio e roda como "root" sem ser root no computador. No Windows, uma imagem Linux precisa de um kernel Linux, que vem do WSL2: container compartilha o kernel do host, por isso não roda imagem de outro sistema sem uma VM.

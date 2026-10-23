@@ -16,10 +16,19 @@ public class Imagem
     /// <summary>Imagem vazia embutida, como o <c>scratch</c> do Docker.</summary>
     public const string NomeScratch = "scratch";
 
+    public const string PlataformaWindows = "windows";
+    public const string PlataformaLinux = "linux";
+
     public string Id { get; set; } = GerarId();
     public string Repositorio { get; set; } = string.Empty;
     public string Tag { get; set; } = "latest";
     public DateTime CriadaEm { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Para qual kernel os programas da imagem foram feitos. Imagens Windows
+    /// vêm do build; imagens Linux, do <c>pull</c> no Docker Hub.
+    /// </summary>
+    public string Plataforma { get; set; } = PlataformaWindows;
 
     /// <summary>Comando padrão (<c>CMD</c>), usado quando o run não informa um.</summary>
     public string? Comando { get; set; }
@@ -30,6 +39,11 @@ public class Imagem
     /// <summary>Instruções que produziram a imagem, da base até aqui.</summary>
     public List<string> Historico { get; set; } = [];
 
+    /// <summary>
+    /// Imagem Windows: a pasta com os arquivos. Imagem Linux: o arquivo .tar
+    /// da camada, como veio do registro — os arquivos Linux (links simbólicos,
+    /// permissões) não sobrevivem a uma extração no NTFS.
+    /// </summary>
     public string CaminhoRootFs { get; set; } = string.Empty;
     public long TamanhoBytes { get; set; }
 
@@ -78,7 +92,8 @@ public static partial class ReferenciaImagem
         return $"{repositorio}:{tag}";
     }
 
-    [GeneratedRegex("^[a-z0-9][a-z0-9_.-]*$")]
+    // Aceita um nível de namespace, como no Docker Hub: "usuario/imagem".
+    [GeneratedRegex("^[a-z0-9][a-z0-9_.-]*(/[a-z0-9][a-z0-9_.-]*)?$")]
     private static partial Regex PadraoRepositorio();
 
     [GeneratedRegex("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")]

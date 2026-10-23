@@ -7,6 +7,9 @@ public interface IServicoImagem
     /// <summary><c>docker build -t referencia contexto</c>.</summary>
     Imagem Construir(string contexto, string referencia, string? arquivo = null, Action<string>? saida = null);
 
+    /// <summary><c>docker pull</c>: baixa uma imagem Linux do Docker Hub.</summary>
+    Imagem Baixar(string referencia, Action<string>? saida = null);
+
     IReadOnlyList<Imagem> Listar();
 
     /// <summary>Busca por <c>nome[:tag]</c> ou prefixo do id; <c>scratch</c> é a imagem vazia.</summary>

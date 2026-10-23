@@ -3,6 +3,7 @@ using System.Text.Json;
 using MiniDocker.Nucleo.Interop;
 using MiniDocker.Nucleo.Modelos;
 using MiniDocker.Nucleo.Repositorios;
+using MiniDocker.Nucleo.Servicos.Runtimes;
 
 namespace MiniDocker.Nucleo.Servicos;
 
@@ -10,6 +11,7 @@ public class ServicoImagem : IServicoImagem
 {
     private const string EntradaMetadados = "imagem.json";
     private const string PastaRootFs = "rootfs";
+    private const string ArquivoCamada = "rootfs.tar";
 
     private readonly IRepositorioImagem repositorio;
     private readonly string raizImagens;
@@ -61,6 +63,35 @@ public class ServicoImagem : IServicoImagem
         }
     }
 
+    public Imagem Baixar(string referencia, Action<string>? saida = null)
+    {
+        var (nomeRepositorio, tag) = ReferenciaImagem.Separar(referencia);
+        var diretorioTemporario = Path.Combine(raizImagens, $".pull-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(diretorioTemporario);
+
+        try
+        {
+            var configuracao = RegistroDockerHub.Baixar(nomeRepositorio, tag,
+                Path.Combine(diretorioTemporario, ArquivoCamada), saida ?? (_ => { }));
+
+            var imagem = new Imagem
+            {
+                Repositorio = nomeRepositorio,
+                Tag = tag,
+                Plataforma = Imagem.PlataformaLinux,
+                Comando = configuracao.Comando,
+                Ambiente = configuracao.Ambiente,
+                Historico = [$"PULL docker.io/{nomeRepositorio}:{tag}"]
+            };
+            return Registrar(imagem, diretorioTemporario);
+        }
+        catch
+        {
+            Workspace.ApagarDiretorio(diretorioTemporario);
+            throw;
+        }
+    }
+
     public IReadOnlyList<Imagem> Listar() =>
         repositorio.ObterTodas().OrderByDescending(i => i.CriadaEm).ToList();
 
@@ -85,7 +116,7 @@ public class ServicoImagem : IServicoImagem
         {
             1 => porId[0],
             0 => throw new InvalidOperationException(
-                $"Imagem '{referenciaOuId}' nao existe. Use 'minidocker build' ou 'minidocker load'."),
+                $"Imagem '{referenciaOuId}' nao existe. Use 'minidocker pull', 'build' ou 'load'."),
             _ => throw new InvalidOperationException(
                 $"O prefixo '{referenciaOuId}' corresponde a mais de uma imagem.")
         };
@@ -106,6 +137,7 @@ public class ServicoImagem : IServicoImagem
     public Imagem Commit(Conteiner conteiner, string referencia)
     {
         var (nomeRepositorio, tag) = ReferenciaImagem.Separar(referencia);
+        ExigirWindows(conteiner.Plataforma, "commit");
         var origem = conteiner.Imagem == Imagem.NomeScratch ? null : TentarObter(conteiner.Imagem);
 
         var imagem = new Imagem
@@ -137,6 +169,8 @@ public class ServicoImagem : IServicoImagem
         {
             throw new InvalidOperationException("A imagem scratch e embutida e nao precisa ser exportada.");
         }
+
+        ExigirWindows(imagem.Plataforma, "save");
 
         if (File.Exists(arquivoZip))
         {
@@ -199,6 +233,7 @@ public class ServicoImagem : IServicoImagem
         {
             case "FROM":
                 var baseImagem = Obter(instrucao.Argumentos);
+                ExigirWindows(baseImagem.Plataforma, "build");
                 if (!baseImagem.EhScratch)
                 {
                     Workspace.CopiarDiretorio(baseImagem.CaminhoRootFs, rootfs);
@@ -241,9 +276,9 @@ public class ServicoImagem : IServicoImagem
     /// </summary>
     private static void ExecutarPassoRun(InstrucaoBuild instrucao, Imagem imagem, string rootfs, Action<string> saida)
     {
+        var processo = RuntimeWindows.Processo(rootfs, imagem.Ambiente, instrucao.Argumentos);
         using var trabalho = new ObjetoTrabalho(LimitesRecursos.Nenhum, $@"Local\MiniDocker-build-{Guid.NewGuid():N}");
-        var resultado = ExecutorProcesso.Executar(
-            trabalho, instrucao.Argumentos, rootfs, imagem.Ambiente, linha => saida($" ---> {linha}"));
+        var resultado = ExecutorProcesso.Executar(trabalho, processo, linha => saida($" ---> {linha}"));
 
         if (resultado.CodigoSaida != 0)
         {
@@ -287,8 +322,11 @@ public class ServicoImagem : IServicoImagem
         Workspace.ApagarDiretorio(destino);
         Directory.Move(diretorioPreparado, destino);
 
-        imagem.CaminhoRootFs = Path.Combine(destino, PastaRootFs);
-        imagem.TamanhoBytes = Workspace.TamanhoDiretorio(imagem.CaminhoRootFs);
+        imagem.CaminhoRootFs = Path.Combine(destino,
+            imagem.Plataforma == Imagem.PlataformaLinux ? ArquivoCamada : PastaRootFs);
+        imagem.TamanhoBytes = imagem.Plataforma == Imagem.PlataformaLinux
+            ? new FileInfo(imagem.CaminhoRootFs).Length
+            : Workspace.TamanhoDiretorio(imagem.CaminhoRootFs);
 
         if (repositorio.Salvar(imagem) is { } substituida)
         {
@@ -296,6 +334,19 @@ public class ServicoImagem : IServicoImagem
         }
 
         return imagem;
+    }
+
+    /// <summary>
+    /// Build, commit e save trabalham com a pasta de arquivos das imagens
+    /// Windows. Para imagens Linux, que guardam um .tar, ficaram de fora.
+    /// </summary>
+    private static void ExigirWindows(string plataforma, string operacao)
+    {
+        if (plataforma == Imagem.PlataformaLinux)
+        {
+            throw new InvalidOperationException(
+                $"O {operacao} so e suportado para imagens Windows; imagens Linux vem do pull.");
+        }
     }
 
     private Imagem? TentarObter(string referenciaOuId)

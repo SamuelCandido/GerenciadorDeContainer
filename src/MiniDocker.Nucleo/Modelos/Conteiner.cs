@@ -12,6 +12,9 @@ public class Conteiner
     /// <summary>Referência da imagem de onde o rootfs foi copiado.</summary>
     public string Imagem { get; set; } = Modelos.Imagem.NomeScratch;
 
+    /// <summary>Herdada da imagem; decide como o container é executado.</summary>
+    public string Plataforma { get; set; } = Modelos.Imagem.PlataformaWindows;
+
     /// <summary>Variáveis da imagem somadas às do <c>-e</c>, aplicadas por cima do ambiente mínimo.</summary>
     public Dictionary<string, string> Ambiente { get; set; } = [];
     public EstadoConteiner Estado { get; set; } = EstadoConteiner.Criado;

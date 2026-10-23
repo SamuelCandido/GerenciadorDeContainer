@@ -7,6 +7,7 @@ using MiniDocker.Nucleo.Servicos;
 
 var servico = new ServicoConteiner();
 var imagens = new ServicoImagem();
+string? motivoSemEstatisticas = null;
 
 try
 {
@@ -43,6 +44,8 @@ try
 			return Stats(resto);
 		case "inspect":
 			return Inspecionar(resto);
+		case "pull":
+			return ParaCada(resto, nome => imagens.Baixar(nome, Console.WriteLine));
 		case "build":
 			return Build(resto);
 		case "images":
@@ -94,7 +97,8 @@ int CriarOuExecutar(string[] argumentos, bool executar)
 		Ambiente = LerAmbiente(linha),
 		RemoverAoFinalizar = linha.Tem("--rm")
 	};
-	var comando = linha.Posicionais.Count > 1 ? string.Join(' ', linha.Posicionais.Skip(1)) : null;
+	var imagem = GarantirImagem(linha.Posicionais[0]);
+	var comando = MontarComando(linha.Posicionais.Skip(1).ToList(), imagem.Plataforma);
 	var conteiner = servico.Criar(linha.Valor("--name"), linha.Posicionais[0], comando, opcoes);
 
 	if (!executar)
@@ -111,6 +115,39 @@ int CriarOuExecutar(string[] argumentos, bool executar)
 	}
 
 	return IniciarAnexado(conteiner.Nome, interativo);
+}
+
+// Como o docker run: se a imagem não existe localmente, tenta baixar.
+Imagem GarantirImagem(string referencia)
+{
+	try
+	{
+		return imagens.Obter(referencia);
+	}
+	catch (InvalidOperationException)
+	{
+		Console.WriteLine($"Imagem '{referencia}' nao encontrada localmente.");
+		return imagens.Baixar(referencia, Console.WriteLine);
+	}
+}
+
+// Um argumento só é usado como veio: já é uma linha de shell, como em
+// run alpine "echo a; echo b". Vários são citados um a um, para que o shell do
+// container receba exatamente os mesmos argumentos — como no Docker, em que
+// run alpine sh -c 'echo $HOSTNAME' chega intacto ao sh.
+static string? MontarComando(IReadOnlyList<string> partes, string plataforma)
+{
+	if (partes.Count <= 1)
+	{
+		return partes.Count == 0 ? null : partes[0];
+	}
+
+	return string.Join(' ', partes.Select(parte =>
+		parte.Length > 0 && parte.All(c => char.IsLetterOrDigit(c) || "-_./=:,+@%".Contains(c))
+			? parte
+			: plataforma == Imagem.PlataformaLinux
+				? $"'{parte.Replace("'", @"'\''")}'"
+				: $"\"{parte}\""));
 }
 
 int Iniciar(string[] argumentos)
@@ -187,6 +224,14 @@ void IniciarEmSegundoPlano(Conteiner conteiner)
 		RedirectStandardOutput = true,
 		RedirectStandardError = true
 	};
+	if (!OperatingSystem.IsWindows())
+	{
+		// No Linux, fechar o terminal manda SIGHUP para a sessão dele. O setsid
+		// põe o shim numa sessão própria, longe desse sinal.
+		informacoes.FileName = "setsid";
+		informacoes.ArgumentList.Add("-w");
+		informacoes.ArgumentList.Add(Environment.ProcessPath!);
+	}
 	if (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "dotnet")
 	{
 		informacoes.ArgumentList.Add(typeof(Program).Assembly.Location);
@@ -299,7 +344,9 @@ int Exec(string[] argumentos)
 	// O Ctrl+C chega também ao processo do exec, que divide o console com o CLI;
 	// o CLI só ignora e espera ele terminar.
 	Console.CancelKeyPress += (_, evento) => evento.Cancel = true;
-	return servico.ExecutarNoConteiner(linha.Posicionais[0], string.Join(' ', linha.Posicionais.Skip(1)));
+	var plataforma = servico.Obter(linha.Posicionais[0]).Plataforma;
+	return servico.ExecutarNoConteiner(linha.Posicionais[0],
+		MontarComando(linha.Posicionais.Skip(1).ToList(), plataforma)!);
 }
 
 int Stats(string[] argumentos)
@@ -336,6 +383,11 @@ int Stats(string[] argumentos)
 	}
 
 	ImprimirTabela(["CONTAINER ID", "NOME", "CPU %", "MEM PICO / LIMITE", "PROCS / LIMITE", "PROCS CRIADOS"], linhas);
+	if (linhas.Count < nomes.Count && motivoSemEstatisticas is not null)
+	{
+		Console.Error.WriteLine($"Sem estatisticas para {nomes.Count - linhas.Count} container(s): {motivoSemEstatisticas}");
+	}
+
 	return 0;
 }
 
@@ -345,8 +397,9 @@ ContabilidadeTrabalho? TentarEstatisticas(string nome)
 	{
 		return servico.Estatisticas(nome);
 	}
-	catch (InvalidOperationException)
+	catch (InvalidOperationException excecao)
 	{
+		motivoSemEstatisticas = excecao.Message;
 		return null;
 	}
 }
@@ -404,10 +457,10 @@ int ListarImagens(string[] argumentos)
 	}
 
 	ImprimirTabela(
-		["REPOSITORIO", "TAG", "IMAGE ID", "CRIADA", "TAMANHO"],
+		["REPOSITORIO", "TAG", "IMAGE ID", "PLATAFORMA", "CRIADA", "TAMANHO"],
 		lista.Select(i => new[]
 		{
-			i.Repositorio, i.Tag, i.Id, $"ha {Decorrido(i.CriadaEm)}", FormatarBytes(i.TamanhoBytes)
+			i.Repositorio, i.Tag, i.Id, i.Plataforma, $"ha {Decorrido(i.CriadaEm)}", FormatarBytes(i.TamanhoBytes)
 		}));
 	return 0;
 }
@@ -608,9 +661,9 @@ static void ExibirAjuda()
 		      -it                           interativo, ligado a este console
 		      --name NOME                   nome do container (padrao: gerado)
 		      -e, --env CHAVE=valor         variavel de ambiente (repetivel)
-		      -m, --memory 256m             limite de memoria
-		      --cpus 0.5                    limite de CPU, em nucleos
-		      --pids-limit 10               limite de processos vivos
+		      -m, --memory 256m             limite de memoria (so Windows)
+		      --cpus 0.5                    limite de CPU, em nucleos (so Windows)
+		      --pids-limit 10               limite de processos vivos (so Windows)
 		      --rm                          remove o container ao terminar
 		  create [OPCOES] IMAGEM [COMANDO] Cria sem executar
 		  start [-a] CONTAINER...          Inicia (em segundo plano; -a anexa)
@@ -624,6 +677,7 @@ static void ExibirAjuda()
 		  inspect NOME...                  Detalhes em JSON (container ou imagem)
 
 		Imagens:
+		  pull IMAGEM[:TAG]...             Baixa uma imagem Linux do Docker Hub (ex.: alpine)
 		  build -t NOME[:TAG] [-f ARQUIVO] [CONTEXTO]   Constroi a partir do MiniDockerfile
 		  images [-q]                      Lista as imagens
 		  rmi IMAGEM...                    Remove imagens
@@ -634,7 +688,8 @@ static void ExibirAjuda()
 		A imagem "scratch" e embutida e vazia.
 
 		Exemplos:
-		  minidocker run scratch echo ola
+		  minidocker run scratch echo ola          (Windows)
+		  minidocker run alpine echo ola           (Linux, ou Windows com WSL2)
 		  minidocker run -d --name web --cpus 0.5 scratch ping -t 127.0.0.1
 		  minidocker logs -f web
 		  minidocker stop web

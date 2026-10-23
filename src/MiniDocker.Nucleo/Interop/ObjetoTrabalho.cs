@@ -15,7 +15,7 @@ namespace MiniDocker.Nucleo.Interop;
 /// <item>fechar o handle encerra o grupo inteiro, sem deixar órfãos.</item>
 /// </list>
 /// </summary>
-public sealed class ObjetoTrabalho : IDisposable
+public sealed class ObjetoTrabalho : IGrupoProcessos
 {
     private const long UnidadesPorMilissegundo = 10_000; // intervalos de 100 ns
     private const int ErroArquivoNaoEncontrado = 2; // ERROR_FILE_NOT_FOUND
@@ -211,6 +211,8 @@ public sealed class ObjetoTrabalho : IDisposable
         // encerra o grupo de qualquer forma.
         NativeMethods.TerminateJobObject(handle, 1);
     }
+
+    ContabilidadeTrabalho? IGrupoProcessos.Contabilizar() => Contabilizar();
 
     public void Dispose() => handle.Dispose();
 

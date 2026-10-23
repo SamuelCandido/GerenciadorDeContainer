@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using MiniDocker.Nucleo.Interop;
 using MiniDocker.Nucleo.Modelos;
 using MiniDocker.Nucleo.Repositorios;
+using MiniDocker.Nucleo.Servicos.Runtimes;
 
 namespace MiniDocker.Nucleo.Servicos;
 
@@ -40,6 +41,12 @@ public partial class ServicoConteiner : IServicoConteiner
         ValidarNome(nome);
         opcoes.Limites.Validar();
         var origem = imagens.Obter(imagem);
+        var runtime = SeletorRuntime.Para(origem.Plataforma);
+        if (opcoes.Limites.AlgumDefinido && !runtime.AplicaLimites)
+        {
+            throw new ArgumentException(
+                "Limites de memoria, CPU e processos so se aplicam a containers Windows (Job Object).");
+        }
 
         comando = string.IsNullOrWhiteSpace(comando) ? origem.Comando : comando;
         if (string.IsNullOrWhiteSpace(comando))
@@ -55,16 +62,6 @@ public partial class ServicoConteiner : IServicoConteiner
 
         var caminhoRootFs = Path.Combine(raizWorkspace, "containers", nome);
         Workspace.ApagarDiretorio(caminhoRootFs);
-        if (origem.EhScratch)
-        {
-            Directory.CreateDirectory(caminhoRootFs);
-        }
-        else
-        {
-            // Cópia, não referência: o container altera o próprio rootfs sem
-            // tocar na imagem nem nos outros containers criados dela.
-            Workspace.CopiarDiretorio(origem.CaminhoRootFs, caminhoRootFs);
-        }
 
         var ambiente = new Dictionary<string, string>(origem.Ambiente);
         foreach (var (chave, valor) in opcoes.Ambiente)
@@ -76,12 +73,14 @@ public partial class ServicoConteiner : IServicoConteiner
         {
             Nome = nome,
             Imagem = origem.Referencia,
+            Plataforma = origem.Plataforma,
             Comando = comando,
             Ambiente = ambiente,
             CaminhoRootFs = caminhoRootFs,
             Limites = opcoes.Limites,
             RemoverAoFinalizar = opcoes.RemoverAoFinalizar
         };
+        runtime.PrepararRootFs(origem, conteiner);
         repositorio.Salvar(conteiner);
         return conteiner;
     }
@@ -94,14 +93,19 @@ public partial class ServicoConteiner : IServicoConteiner
             throw new InvalidOperationException($"O container '{conteiner.Nome}' ja esta em execucao.");
         }
 
+        // Montado antes de tudo: se a plataforma não roda neste host, o erro
+        // aparece sem mexer no estado do container.
+        var runtime = SeletorRuntime.Para(conteiner.Plataforma);
+        var processo = runtime.CriarProcesso(conteiner, conteiner.Comando);
+
         int? codigoSaida = null;
         ContabilidadeTrabalho? contabilidade = null;
 
-        // O Job Object nasce antes de o registro dizer "Executando". Assim,
-        // quem vir Executando sempre encontra o job no kernel — e, se não
-        // encontrar, sabe que o dono morreu. O nome do job também impede dois
-        // starts simultâneos do mesmo container.
-        using (var trabalho = new ObjetoTrabalho(conteiner.Limites, conteiner.NomeTrabalho))
+        // O grupo nasce antes de o registro dizer "Executando". Assim, quem
+        // vir Executando sempre encontra o grupo — e, se não encontrar, sabe
+        // que o dono morreu. O nome do grupo também impede dois starts
+        // simultâneos do mesmo container.
+        using (var grupo = GruposDeProcessos.Criar(conteiner.Limites, conteiner.NomeTrabalho))
         {
             conteiner = repositorio.Atualizar(conteiner.Nome, c =>
             {
@@ -122,8 +126,7 @@ public partial class ServicoConteiner : IServicoConteiner
                     saida?.Invoke(linha);
                 };
 
-                var resultado = ExecutorProcesso.Executar(
-                    trabalho, conteiner.Comando, conteiner.CaminhoRootFs, conteiner.Ambiente, encaminhar,
+                var resultado = ExecutorProcesso.Executar(grupo, processo, encaminhar,
                     aoIniciar: pid => repositorio.Atualizar(conteiner.Nome, c => c.IdProcesso = pid));
 
                 codigoSaida = resultado.CodigoSaida;
@@ -136,6 +139,8 @@ public partial class ServicoConteiner : IServicoConteiner
             }
             finally
             {
+                runtime.AposTermino(conteiner);
+
                 // Mesmo se a execução falhar no meio, o registro não pode ficar
                 // preso em Executando. CodigoSaida nulo indica falha. Isto roda
                 // com o job ainda aberto, então ninguém observa um meio-termo.
@@ -207,10 +212,12 @@ public partial class ServicoConteiner : IServicoConteiner
         // morrer, o dono já vai ler que foi um stop, e não um término normal.
         repositorio.Atualizar(conteiner.Nome, c => c.ParadaSolicitada = true);
 
-        using (var trabalho = ObjetoTrabalho.Abrir(conteiner.NomeTrabalho))
+        using (var grupo = GruposDeProcessos.Abrir(conteiner.NomeTrabalho))
         {
-            trabalho?.Encerrar(CodigoSaidaParado);
+            grupo?.Encerrar(CodigoSaidaParado);
         }
+
+        SeletorRuntime.Para(conteiner.Plataforma).AposTermino(conteiner);
 
         // O registro final é escrito pelo dono, em outro processo. Espera por
         // ele como o docker stop espera o container sair.
@@ -256,7 +263,7 @@ public partial class ServicoConteiner : IServicoConteiner
         }
 
         repositorio.Remover(conteiner.Nome);
-        Workspace.ApagarDiretorio(conteiner.CaminhoRootFs);
+        SeletorRuntime.Para(conteiner.Plataforma).Remover(conteiner);
         File.Delete(CaminhoLog(conteiner));
     }
 
@@ -268,18 +275,21 @@ public partial class ServicoConteiner : IServicoConteiner
             throw new ArgumentException("O comando nao pode ser vazio.", nameof(comando));
         }
 
-        using var trabalho = AbrirTrabalho(conteiner);
+        using var grupo = AbrirGrupo(conteiner);
 
-        // Entra no mesmo Job Object: herda os limites, as restrições de
-        // interface e é encerrado junto com o container.
-        return ExecutorProcesso.ExecutarAnexado(trabalho, comando, conteiner.CaminhoRootFs, conteiner.Ambiente);
+        // Entra no mesmo grupo: no Windows herda os limites e as restrições do
+        // Job Object; no Linux, os namespaces. E morre junto com o container.
+        var processo = SeletorRuntime.Para(conteiner.Plataforma).CriarProcessoExec(conteiner, comando, grupo);
+        return ExecutorProcesso.ExecutarAnexado(grupo, processo);
     }
 
     public ContabilidadeTrabalho Estatisticas(string nomeOuId)
     {
         var conteiner = Obter(nomeOuId);
-        using var trabalho = AbrirTrabalho(conteiner);
-        return trabalho.Contabilizar();
+        using var grupo = AbrirGrupo(conteiner);
+        return grupo.Contabilizar()
+            ?? throw new InvalidOperationException(
+                "O stats so esta disponivel para containers Windows, medidos pelo Job Object.");
     }
 
     public void LerLogs(string nomeOuId, bool seguir, Action<string> saida, CancellationToken cancelamento = default)
@@ -314,13 +324,13 @@ public partial class ServicoConteiner : IServicoConteiner
     }
 
     /// <summary>
-    /// Corrige um registro que diz Executando mas cujo Job Object não existe
+    /// Corrige um registro que diz Executando mas cujo grupo de processos não existe
     /// mais — o processo dono morreu sem gravar o fim (foi morto, a máquina
     /// caiu). Com KILL_ON_JOB_CLOSE, o grupo morreu junto com ele.
     /// </summary>
     private Conteiner Reconciliar(Conteiner conteiner)
     {
-        if (conteiner.Estado != EstadoConteiner.Executando || ObjetoTrabalho.Existe(conteiner.NomeTrabalho))
+        if (conteiner.Estado != EstadoConteiner.Executando || GruposDeProcessos.Existe(conteiner.NomeTrabalho))
         {
             return conteiner;
         }
@@ -336,8 +346,8 @@ public partial class ServicoConteiner : IServicoConteiner
         });
     }
 
-    private static ObjetoTrabalho AbrirTrabalho(Conteiner conteiner) =>
-        (conteiner.Estado == EstadoConteiner.Executando ? ObjetoTrabalho.Abrir(conteiner.NomeTrabalho) : null)
+    private static IGrupoProcessos AbrirGrupo(Conteiner conteiner) =>
+        (conteiner.Estado == EstadoConteiner.Executando ? GruposDeProcessos.Abrir(conteiner.NomeTrabalho) : null)
             ?? throw new InvalidOperationException($"O container '{conteiner.Nome}' nao esta em execucao.");
 
     private StreamWriter AbrirLog(Conteiner conteiner)

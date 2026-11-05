@@ -111,18 +111,24 @@ public class ServicoConteinerTestes : IDisposable
         // stop + start, o arquivo tem duas linhas: é o mesmo container, com o
         // mesmo sistema de arquivos — não um novo criado da imagem.
         var original = servico.Criar("c1", "scratch", "echo iniciou>> vezes.txt & ping -n 60 127.0.0.1");
+        var vezes = Path.Combine(original.CaminhoRootFs, "vezes.txt");
+
+        // "Executando" é gravado assim que o job existe, antes de o cmd.exe
+        // rodar o echo; por isso espera a linha aparecer antes de parar.
         var primeiro = Task.Run(() => servico.Iniciar("c1"));
         EsperarExecucao("c1");
+        EsperarLinhas(vezes, 1);
         servico.Parar("c1");
         primeiro.Wait(TimeSpan.FromSeconds(10));
 
         var segundo = Task.Run(() => servico.Iniciar("c1"));
         EsperarExecucao("c1");
+        EsperarLinhas(vezes, 2);
 
         var conteiner = servico.Obter("c1");
         Assert.Equal(EstadoConteiner.Executando, conteiner.Estado);
         Assert.Equal(original.Id, conteiner.Id);
-        Assert.Equal(2, File.ReadAllLines(Path.Combine(conteiner.CaminhoRootFs, "vezes.txt")).Length);
+        Assert.Equal(2, File.ReadAllLines(vezes).Length);
 
         servico.Parar("c1");
         segundo.Wait(TimeSpan.FromSeconds(10));
@@ -330,6 +336,16 @@ public class ServicoConteinerTestes : IDisposable
         while (servico.Obter(nome) is not { Estado: EstadoConteiner.Executando, IdProcesso: not null })
         {
             Assert.True(DateTime.UtcNow < limite, "O container nao entrou em execucao.");
+            Thread.Sleep(20);
+        }
+    }
+
+    private static void EsperarLinhas(string caminho, int quantidade)
+    {
+        var limite = DateTime.UtcNow.AddSeconds(10);
+        while (!File.Exists(caminho) || File.ReadAllLines(caminho).Length < quantidade)
+        {
+            Assert.True(DateTime.UtcNow < limite, $"{caminho} nao chegou a {quantidade} linha(s).");
             Thread.Sleep(20);
         }
     }

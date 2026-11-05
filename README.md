@@ -10,6 +10,7 @@ Cada container é um **grupo de processos** criado dentro de um [Job Object](htt
 
 - [Requisitos](#requisitos)
 - [Início rápido](#início-rápido)
+- [A loja por dentro: como o exemplo web funciona](#a-loja-por-dentro-como-o-exemplo-web-funciona)
 - [Comandos](#comandos)
 - [Imagens e o MiniDockerfile](#imagens-e-o-minidockerfile)
 - [Como funciona](#como-funciona)
@@ -37,7 +38,7 @@ doskey minidocker=dotnet run --project src\MiniDocker.Cli -- $*
 minidocker run --rm scratch echo ola
 ```
 
-### O gato e o cachorro
+### Exemplos: um job e um site
 
 Para apresentar, siga o roteiro em [exemplos/README.md](exemplos/README.md): cada passo traz o comando, a saída esperada e o que explicar.
 
@@ -45,32 +46,31 @@ Há dois exemplos, um de cada tipo de container:
 
 | Imagem | Tipo | O que faz |
 |---|---|---|
-| [`exemplos/gato`](exemplos/gato) | **Roda e morre** | Mia uma vez e termina — o container fica `Finalizado (0)`. Como um script, um job, uma migração de banco |
-| [`exemplos/cachorro`](exemplos/cachorro) | **Roda em loop** | Late a cada 2 s até alguém dar `stop`. Como um servidor web, um banco de dados |
+| [`exemplos/relatorio`](exemplos/relatorio) | **Roda e termina** | Lê um CSV de vendas, soma por região, grava o relatório e sai com `0` (ou `2`, se os dados forem inválidos). Como um job agendado, um ETL, um passo de CI |
+| [`exemplos/web`](exemplos/web) | **Fica no ar** | Site com contador de visitas, `/saude` e `/info`, que fica rodando em segundo plano até alguém dar `stop`. Como um servidor web, uma API |
 
 ```bat
-minidocker build -t gato exemplos\gato
-minidocker run --name mingau gato                :: mia e termina; o terminal fica livre
-minidocker ps -a                                 :: mingau: Finalizado (0)
+minidocker build -t relatorio exemplos\relatorio
+minidocker run --name relatorio-outubro relatorio  :: imprime o relatorio e termina
+minidocker ps -a                                   :: relatorio-outubro: Finalizado (0)
 ```
 
-O cachorro também guarda, **num arquivo dentro do próprio container**, quantas vezes ele já foi iniciado. É isso que mostra que o `start` volta o mesmo container:
+O site guarda as visitas **num arquivo dentro do próprio container**. É isso que mostra que o `start` volta o mesmo container:
 
 ```bat
-minidocker build -t cachorro exemplos\cachorro   :: 1. a imagem: o molde
-minidocker run -d --name rex cachorro            :: 2. o container rex nasce da imagem e roda
-minidocker logs rex                              ::    "Rex acordou! ... iniciado 1 vez(es)"
+minidocker build -t web exemplos\web               :: 1. a imagem: o molde
+minidocker run -d --name loja web                  :: 2. o container nasce da imagem e fica no ar
+                                                   ::    abra http://localhost:8080 e recarregue
+minidocker stop loja                               :: 3. o site cai...
+minidocker ps -a                                   ::    ...mas a loja continua existindo: "Parado (137)"
 
-minidocker stop rex                              :: 3. os processos morrem...
-minidocker ps -a                                 ::    ...mas o rex continua existindo: "Parado (137)"
+minidocker start loja                              :: 4. o MESMO container volta, sem novo run
+                                                   ::    as visitas continuam de onde pararam
 
-minidocker start rex                             :: 4. o MESMO container volta, sem novo run
-minidocker logs rex                              ::    "... iniciado 2 vez(es)": o arquivo sobreviveu
+minidocker run -d --name filial -e PORTA=8081 web  :: 5. outro container da mesma imagem
+                                                   ::    http://localhost:8081 comeca do zero
 
-minidocker run -d --name bidu -e NOME=Bidu cachorro  :: 5. outro container da mesma imagem
-minidocker logs bidu                                 ::    "Bidu acordou! ... iniciado 1 vez(es)"
-
-minidocker rm -f rex bidu                        :: 6. agora sim deixam de existir
+minidocker rm -f loja filial                       :: 6. agora sim deixam de existir
 ```
 
 Os três conceitos que a demonstração separa:
@@ -89,6 +89,136 @@ E o que cada comando faz com eles:
 | `start` | Nascem de novo, do zero | Os mesmos de antes | O mesmo |
 | `rm` | — | Apagados | Deixa de existir |
 | `run` | Nascem | Cópia nova da imagem | Um container **novo** |
+
+## A loja por dentro: como o exemplo web funciona
+
+O exemplo [`exemplos/web`](exemplos/web) é um site de verdade rodando dentro de um container: você abre `http://localhost:8080` no navegador, e quem responde é um PowerShell preso no Job Object do container.
+
+### Os arquivos
+
+```text
+exemplos\web\
+├── MiniDockerfile     a receita da imagem
+├── servidor.bat       o ponto de entrada: o CMD da imagem chama este arquivo
+├── servidor.ps1       o servidor web (uns 70 linhas)
+└── site\
+    └── index.html     o modelo da página, com marcadores {{NOME}}, {{VISITAS}}...
+```
+
+### A receita, linha a linha
+
+| Linha do `MiniDockerfile` | O que faz |
+|---|---|
+| `FROM scratch` | Começa de uma pasta vazia |
+| `COPY servidor.ps1 .` e `COPY servidor.bat .` | Põe o código do servidor na raiz da imagem |
+| `COPY site site` | Copia a pasta `site` inteira (a página) |
+| `ENV PORTA=8080` | Porta padrão. O `-e PORTA=8081` do `run` sobrescreve |
+| `ENV NOME_SITE=Loja do Grupo` | Nome padrão. O `-e "NOME_SITE=Filial Centro"` sobrescreve |
+| `RUN echo 1.0.0 (build ...) > VERSAO.txt` | Roda **no build**, num container temporário. O `VERSAO.txt` gerado vira parte da imagem, e o site mostra a versão |
+| `CMD servidor.bat` | O que roda quando alguém der `run` sem informar comando |
+
+### O que nasce no `run -d --name loja web`
+
+```text
+MiniDocker.Cli.exe __shim loja          o shim: dono do container, segura o handle do job
+└── Job Object "Local\MiniDocker-<id>"  limites (-m, --cpus) e restrições de interface
+    └── cmd.exe /c servidor.bat         pasta atual = %USERPROFILE%\.minidocker\containers\loja
+        ├── conhost.exe                 o console que o Windows cria para o cmd
+        └── powershell.exe -File servidor.ps1     ← o site
+```
+
+1. O `create` copia a imagem para `containers\loja` e grava o ambiente: o mínimo do sistema mais `PORTA` e `NOME_SITE`.
+2. O shim cria o Job Object e lança `cmd.exe /c servidor.bat`, com a pasta do container como diretório de trabalho.
+3. O `servidor.bat` chama o PowerShell, que nasce **dentro do mesmo job**, porque filhos herdam o grupo.
+4. O `servidor.ps1` abre a porta e fica esperando requisições. O shim lê a saída dele e grava no log.
+
+### Por que existe um `.bat` no meio?
+
+```bat
+@echo off
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File servidor.ps1
+exit /b %ERRORLEVEL%
+```
+
+| Parte | Por quê |
+|---|---|
+| Um `.bat` como `CMD` | O MiniDocker executa todo comando com `cmd.exe /c`. Um script de entrada deixa o `CMD` curto e faz o `ps` mostrar `"servidor.bat"` em vez de uma linha gigante. É o papel do `docker-entrypoint.sh` em imagens reais |
+| Caminho completo do PowerShell | O container recebe um ambiente **mínimo**: o `Path` só tem `System32` e a pasta do Windows. O `powershell.exe` fica em `System32\WindowsPowerShell\v1.0`, fora do `Path`. O `%SystemRoot%` funciona porque está no ambiente mínimo |
+| `-NoProfile` | Não carrega o perfil do usuário do host. O container não deve depender da configuração de quem o roda |
+| `-ExecutionPolicy Bypass` | O Windows bloqueia scripts `.ps1` por padrão. A liberação vale **só para este processo**, sem mudar nada no host |
+| `exit /b %ERRORLEVEL%` | Repassa o código de saída do PowerShell para o `cmd.exe`, e dele para o MiniDocker. É por isso que um site que não conseguiu abrir a porta aparece como `Finalizado (1)` no `ps` |
+
+### O `servidor.ps1`, passo a passo
+
+| Trecho | O que faz |
+|---|---|
+| `$env:PORTA`, `$env:NOME_SITE` | Lê a configuração das **variáveis de ambiente**. A mesma imagem vira sites diferentes só trocando o `-e` |
+| `Get-Content VERSAO.txt` | Lê o arquivo que o `RUN` gerou no build |
+| `dados\visitas.txt` | Carrega a contagem de visitas. O caminho é relativo à pasta atual, que é a pasta do container, então cada container tem a própria contagem |
+| `HttpListener` em `http://localhost:PORTA/` | Abre o servidor HTTP. Se a porta estiver ocupada, registra o erro e sai com `exit 1` |
+| `while ($true) { $servidor.GetContext() ... }` | O laço principal. O `GetContext()` **bloqueia** até chegar uma requisição; enquanto isso o processo dorme e não gasta CPU (o `stats` mostra 0%) |
+| `switch ($caminho)` | As rotas: `/` (página + 1 visita, gravada no arquivo na hora), `/saude` (`ok`), `/info` (JSON) e o resto (404) |
+| `site\index.html` | O modelo da página; os marcadores `{{NOME}}`, `{{VISITAS}}`, `{{VERSAO}}`, `{{PID}}` e `{{PORTA}}` são trocados a cada acesso |
+| `Log` → `[Console]::WriteLine` | Escreve na saída padrão, que é um **pipe** lido pelo shim e gravado em `logs\<id>.log`. É o que o `minidocker logs loja` mostra |
+
+### Uma requisição, do navegador ao log
+
+```text
+navegador ──TCP localhost:8080──► http.sys (driver HTTP do kernel do Windows)
+                                      │ entrega ao processo que registrou a URL
+                                      ▼
+                         powershell.exe (dentro do job)
+                            GetContext() acorda → monta a resposta → Log "GET / 200"
+                                      │ stdout (pipe)
+                                      ▼
+                         shim → %USERPROFILE%\.minidocker\logs\<id>.log → minidocker logs loja
+```
+
+O `HttpListener` não abre a porta sozinho: ele registra a URL no **http.sys**, o driver HTTP que roda no kernel. Quem escuta a porta é o driver, que repassa cada requisição ao processo dono da URL. Por isso dois containers na mesma porta conflitam (o driver recusa o segundo registro), e por isso, quando o `stop` mata o PowerShell, o registro some e o navegador recebe "conexão recusada".
+
+### Onde ficam os dados
+
+```text
+%USERPROFILE%\.minidocker\containers\loja\
+├── servidor.bat, servidor.ps1, site\    ← copiados da imagem no create
+├── VERSAO.txt                           ← veio da imagem (gerado pelo RUN)
+└── dados\visitas.txt                    ← criado pelo site; só deste container
+```
+
+| Comando | `visitas.txt` |
+|---|---|
+| `stop` + `start` | Continua lá, e a contagem segue de onde parou |
+| `run` de outro container (`filial`) | O outro container tem o próprio arquivo, começando do zero |
+| Rebuild da imagem | Não muda nada: a loja tem a própria cópia. Só containers **novos** pegam a imagem nova |
+| `rm` | Apagado junto com a pasta do container |
+
+### Conceitos de SO que o exemplo mostra
+
+| No exemplo | Conceito |
+|---|---|
+| `cmd` → `powershell` nascem dentro do job | Árvore de processos; filhos herdam o grupo |
+| `GetContext()` esperando requisição com 0% de CPU | E/S bloqueante: o processo fica no estado **bloqueado**, fora da fila do escalonador, até o kernel acordá-lo |
+| `PORTA` e `NOME_SITE` vindos do `-e` | Bloco de ambiente passado na criação do processo |
+| Saída do site aparecendo no `logs` | Pipes entre processos (stdout redirecionado) |
+| `Finalizado (1)` quando a porta está ocupada | Código de saída do processo, repassado do PowerShell ao `cmd` e ao MiniDocker |
+| Visitas preservadas no `stop`/`start` | Estado em arquivo sobrevive ao processo; estado em memória, não |
+| Duas lojas na mesma porta conflitam | Rede **não isolada**: os containers dividem as portas com o host |
+| `stop` derruba o site na hora | `TerminateJobObject` mata o grupo; o kernel libera os recursos do processo, inclusive o registro no http.sys |
+| `-m 20m` impede o PowerShell de subir | Limite de memória imposto pelo kernel |
+
+### Variações para testar
+
+```bat
+:: outra loja, outra porta, outro nome
+minidocker run -d --name filial -e PORTA=8081 -e "NOME_SITE=Filial Centro" web
+
+:: muda a pagina e reconstroi: so containers NOVOS pegam a versao nova
+notepad exemplos\web\site\index.html
+minidocker build -t web exemplos\web
+minidocker run -d --name nova -e PORTA=8082 web
+```
+
+O site só atende em `localhost`, ou seja, só a própria máquina acessa.
 
 ## Comandos
 
@@ -144,10 +274,10 @@ O `MiniDockerfile` é um subconjunto do Dockerfile:
 
 ```dockerfile
 FROM scratch                       # ou outra imagem local
-COPY cachorro.bat .                # do contexto de build para o rootfs
-ENV NOME=Rex                       # herdada pelos containers
-RUN echo construida > build.txt    # roda num container de build isolado
-CMD cachorro.bat                   # comando padrão do run
+COPY servidor.ps1 .                # do contexto de build para o rootfs
+ENV PORTA=8080                     # herdada pelos containers
+RUN echo 1.0.0 > VERSAO.txt        # roda num container de build isolado
+CMD servidor.bat                   # comando padrão do run
 ```
 
 O `RUN` não roda no host: roda num **container temporário**, com o mesmo Job Object, as mesmas restrições e o mesmo ambiente isolado, tendo o rootfs em construção como diretório de trabalho. O que ele gravar ali vira parte da imagem. `COPY` não aceita caminhos que saiam do contexto (`..\`).
@@ -157,7 +287,7 @@ O Docker evita a cópia usando **camadas** e um sistema de arquivos de união (o
 ## Como funciona
 
 ```text
-minidocker run -d cachorro
+minidocker run -d web
     │
     ├─ create: copia o rootfs da imagem, grava o registro (Criado)
     │

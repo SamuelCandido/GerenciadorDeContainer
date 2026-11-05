@@ -1,0 +1,13 @@
+# Site com contador de visitas: um servico que fica no ar ate alguem dar stop.
+# Para construir (na raiz do repositorio):
+#   minidocker build -t web exemplos\web
+FROM scratch
+COPY servidor.ps1 .
+COPY servidor.bat .
+COPY site site
+ENV PORTA=8080
+ENV NOME_SITE=Loja do Grupo
+# Roda AGORA, no build, num container temporario. O arquivo gerado faz parte
+# da imagem: todo container criado dela sabe a versao com que foi construido.
+RUN echo 1.0.0 (build %DATE% %TIME:~0,8%) > VERSAO.txt
+CMD servidor.bat

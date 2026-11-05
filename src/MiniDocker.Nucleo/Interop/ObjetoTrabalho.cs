@@ -150,7 +150,20 @@ public sealed class ObjetoTrabalho : IDisposable
             return false;
         }
 
-        throw new Win32Exception(erro, "Nao foi possivel atribuir o processo ao Job Object.");
+        // O processo já está rodando, mas fora do grupo: sem restrições nem
+        // limites. Deixá-lo vivo seria uma fuga do container — por exemplo, um
+        // exec recusado pelo --pids-limit continuaria executando no host.
+        try
+        {
+            processo.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+            // Já terminou.
+        }
+
+        throw new Win32Exception(erro, "Nao foi possivel atribuir o processo ao Job Object"
+            + (erro == ErroAcessoNegado ? " (limite de processos do container atingido?)." : "."));
     }
 
     /// <summary>

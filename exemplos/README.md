@@ -1,211 +1,278 @@
 # Roteiro de demonstração
 
-Passo a passo para mostrar o MiniDocker funcionando, usando as duas imagens de exemplo desta pasta:
+Passo a passo para mostrar o MiniDocker funcionando com duas aplicações reais, uma de cada tipo de container. Como o site funciona por dentro (o `.bat`, o `.ps1`, o caminho de uma requisição) está explicado em [A loja por dentro](../README.md#a-loja-por-dentro-como-o-exemplo-web-funciona), no README principal.
 
-| Imagem | Tipo de container | O que faz |
-|---|---|---|
-| [`gato`](gato) | **Roda e morre** | Mia uma vez e termina. Como um script ou uma migração de banco |
-| [`cachorro`](cachorro) | **Roda em loop** | Late a cada 2 segundos até alguém dar `stop`. Como um servidor |
+| Imagem | Tipo de container | O que faz | No mundo real |
+|---|---|---|---|
+| [`relatorio`](relatorio) | **Roda e termina** (job) | Lê um CSV de vendas, valida, soma por região, grava o relatório e sai com um código de saída | Job agendado, ETL, migração de banco, passo de CI |
+| [`web`](web) | **Fica no ar** (serviço) | Site com contador de visitas, health check (`/saude`) e API (`/info`), com log de acesso | Servidor web, API, banco de dados |
 
-As saídas abaixo são ilustrativas: ids, horários e nomes gerados mudam a cada execução.
+As duas rodam em PowerShell **dentro** do container. Os horários, ids e PIDs mudam a cada execução.
+
+**Versão curta (uns 5 minutos):** passos 1, 2, 4, 6, 7, 8 e 11. A ideia central é o site da loja ficar no ar em segundo plano, no navegador, enquanto você mostra o resto. Os passos marcados como opcionais servem para quando houver tempo ou perguntas.
 
 ## Preparação
 
-Na raiz do repositório, num `cmd`:
+Na raiz do repositório:
 
 ```bat
 dotnet build
+```
+
+Crie o apelido `minidocker`. No **cmd**:
+
+```bat
 doskey minidocker=src\MiniDocker.Cli\bin\Debug\net10.0\MiniDocker.Cli.exe $*
 ```
 
-O `doskey` cria um apelido, então daqui em diante basta digitar `minidocker`.
+No **PowerShell**, onde o `doskey` não funciona:
 
-## 1. Build: da receita à imagem
-
-Uma imagem é uma **pasta de arquivos + configurações** (comando padrão e variáveis). Ela é montada a partir de um `MiniDockerfile`, que segue a sintaxe do Dockerfile:
-
-```dockerfile
-FROM scratch                 # começa de uma pasta vazia
-COPY gato.bat .              # copia o script para dentro da imagem
-ENV NOME=Mingau              # variável que todo container vai ter
-RUN echo %DATE% %TIME:~0,8% > construida_em.txt   # roda AGORA, no build
-CMD gato.bat                 # o que roda quando alguém der "run"
+```powershell
+Set-Alias minidocker "$PWD\src\MiniDocker.Cli\bin\Debug\net10.0\MiniDocker.Cli.exe"
 ```
 
+Para fazer requisições, use o `curl.exe`, que já vem no Windows 10/11 (no PowerShell, escreva `curl.exe`, porque `curl` sozinho é outro comando), ou abra os endereços no navegador.
+
+## 1. Build: do código à imagem
+
 ```bat
-minidocker build -t gato exemplos\gato
-minidocker build -t cachorro exemplos\cachorro
+minidocker build -t relatorio exemplos\relatorio
+minidocker build -t web exemplos\web
 minidocker images
 ```
 
 ```text
-Passo 1/5 : FROM scratch
-Passo 2/5 : COPY gato.bat .
-Passo 3/5 : ENV NOME=Mingau
-Passo 4/5 : RUN echo %DATE% %TIME:~0,8% > construida_em.txt
-Passo 5/5 : CMD gato.bat
-Imagem 3f9a1c2b7d10 construida como gato:latest
-...
+Passo 1/8 : FROM scratch
+Passo 2/8 : COPY servidor.ps1 .
+Passo 3/8 : COPY servidor.bat .
+Passo 4/8 : COPY site site
+Passo 5/8 : ENV PORTA=8080
+Passo 6/8 : ENV NOME_SITE=Loja do Grupo
+Passo 7/8 : RUN echo 1.0.0 (build %DATE% %TIME:~0,8%) > VERSAO.txt
+Passo 8/8 : CMD servidor.bat
+Imagem 6a307b584815 construida como web:latest
+
 REPOSITORIO   TAG      IMAGE ID       CRIADA   TAMANHO
-cachorro      latest   6b8fdde4ea60   ha 2 s   555 B
-gato          latest   3f9a1c2b7d10   ha 3 s   412 B
+web           latest   6a307b584815   ha 1 s   3,4 KB
+relatorio     latest   b6626a4408c4   ha 2 s   3,4 KB
 ```
 
-**O que explicar:** o `RUN` não roda no computador do host — roda num container temporário, isolado. O arquivo que ele cria (`construida_em.txt`) passa a fazer parte da imagem, e todo container criado dela já nasce com ele.
+**O que explicar:** a imagem é o código da aplicação mais a configuração (porta, nome do site, comando de início), ou seja, o molde. O `RUN` não roda no computador: roda num **container temporário, isolado**, e o arquivo que ele gera (`VERSAO.txt`) passa a fazer parte da imagem. Todo container criado dela sabe com qual versão foi construído.
 
-## 2. Container que roda e morre: o gato
+## 2. Job: o relatório roda e termina
 
 ```bat
-minidocker run --name mingau gato
+minidocker run --name relatorio-outubro relatorio
 minidocker ps -a
 ```
 
 ```text
-    /\_/\
-   ( o.o )
-    > ^ <
+[16:35:23] Lendo dados\vendas.csv
+RELATORIO DE VENDAS - gerado em 05/11/2026 16:35:23
+Fonte: dados\vendas.csv (15 vendas)
 
-Mingau: miau! Agora sao 14:32:07.
-(esta imagem foi construida em 23/10/2026 14:31:50)
-Mingau foi dormir. Fim do container.
+REGIAO        VENDAS     TOTAL (R$)
+Sudeste            5      41,687.50
+Sul                3      13,794.30
+Nordeste           3      10,397.60
+Centro-Oeste       2       6,297.90
+Norte              2       2,347.50
+TOTAL             15      74,524.80
 
-CONTAINER ID   IMAGEM        COMANDO        CRIADO   STATUS                 NOME
-a1b2c3d4e5f6   gato:latest   "gato.bat"     ha 2 s   Finalizado (0) ha 1 s  mingau
+Produto que mais faturou: Notebook
+[16:35:23] Relatorio gravado em saida\relatorio-20261105-163523.txt. Fim do job.
+
+CONTAINER ID   IMAGEM             COMANDO           CRIADO   STATUS                  NOME
+f7fd8108d3ed   relatorio:latest   "relatorio.bat"   ha 2 s   Finalizado (0) ha 1 s   relatorio-outubro
 ```
 
-**O que explicar:** o processo acabou sozinho, com código 0 (sucesso). O container continua registrado em `Finalizado` — dá para ver os logs ou rodá-lo de novo com `start`.
-
-## 3. Container que roda em loop: o cachorro
+O relatório gravado fica **dentro do container**, que no disco é só uma pasta:
 
 ```bat
-minidocker run -d --name rex cachorro
-minidocker ps
-minidocker logs rex
+dir %USERPROFILE%\.minidocker\containers\relatorio-outubro\saida
 ```
 
-```text
-7e8f9a0b1c2d
+**O que explicar:** é um job, então faz o trabalho e termina. O código de saída 0 diz que deu certo. O container continua registrado, com seus arquivos e o log.
 
-CONTAINER ID   IMAGEM            COMANDO          CRIADO   STATUS             NOME
-7e8f9a0b1c2d   cachorro:latest   "cachorro.bat"   ha 5 s   Executando ha 5 s  rex
+## 3. (Opcional) Job que falha: o código de saída importa
 
-    / \__
-   (    @\___
-   /         O
-  /   (_____/
- /_____/   U
-
-Rex acordou! Este container ja foi iniciado 1 vez(es).
-[14:33:01] Rex: au au! (latido 1)
-[14:33:03] Rex: au au! (latido 2)
-[14:33:05] Rex: au au! (latido 3)
-```
-
-**O que explicar:** o `-d` roda em segundo plano — o terminal fica livre e o cachorro continua latindo. Quem mantém o container vivo é um processo auxiliar do MiniDocker (o papel do `containerd-shim` no Docker), não o terminal. `logs -f rex` acompanha ao vivo (Ctrl+C para sair).
-
-## 4. Stop: os processos morrem, o container fica
+O mesmo job, apontando para um arquivo com dados ruins (a variável `ARQUIVO` vem da imagem e o `-e` a sobrescreve):
 
 ```bat
-minidocker stop rex
+minidocker run --name relatorio-erro -e ARQUIVO=dados\vendas-com-erro.csv relatorio
 minidocker ps -a
 ```
 
 ```text
-rex
+[16:35:25] Lendo dados\vendas-com-erro.csv
+[16:35:25] ERRO: linha 3 invalida: quantidade='cinco' preco='1199.00'
+[16:35:25] Relatorio NAO gerado.
 
-CONTAINER ID   IMAGEM            COMANDO          CRIADO    STATUS                NOME
-7e8f9a0b1c2d   cachorro:latest   "cachorro.bat"   ha 40 s   Parado (137) ha 1 s   rex
-a1b2c3d4e5f6   gato:latest       "gato.bat"       ha 1 min  Finalizado (0) ha 1 min  mingau
+CONTAINER ID   IMAGEM             COMANDO           CRIADO   STATUS                  NOME
+677103948f04   relatorio:latest   "relatorio.bat"   ha 1 s   Finalizado (2) ha 0 s   relatorio-erro
 ```
 
-**O que explicar:** o `stop` chama `TerminateJobObject`, que mata **todos** os processos do grupo de uma vez — o `cmd.exe` e o `ping` que ele criou. O código 137 é o mesmo que o Docker mostra para um container morto à força. Mas o container `rex` **continua existindo**, com os seus arquivos.
+**O que explicar:** o processo terminou com código **2**, e o MiniDocker registrou isso. É assim que um agendador ou um pipeline de CI sabe que o job falhou e precisa avisar alguém, sem ler o log.
 
-## 5. Start: o mesmo container volta
+## 4. Serviço: o site fica no ar
 
 ```bat
-minidocker start rex
-minidocker logs rex
-```
-
-```text
-rex
-
-Rex acordou! Este container ja foi iniciado 1 vez(es).
-[14:33:01] Rex: au au! (latido 1)
-...
-Rex acordou! Este container ja foi iniciado 2 vez(es).
-[14:34:10] Rex: au au! (latido 1)
-```
-
-**O que explicar:** não foi preciso um novo `run`. O `start` voltou **o mesmo** container: o cachorro lembra que já foi iniciado antes, porque guarda a contagem num arquivo dentro do próprio container, e esse arquivo sobreviveu ao `stop`. O log também é o mesmo, por isso aparecem as duas execuções. Já os latidos recomeçam do 1: o processo é novo, a memória dele começa do zero.
-
-## 6. Outro container da mesma imagem
-
-```bat
-minidocker run -d --name bidu -e NOME=Bidu cachorro
-minidocker logs bidu
+minidocker run -d --name loja -m 256m --cpus 0.5 web
 minidocker ps
 ```
 
-```text
-Bidu acordou! Este container ja foi iniciado 1 vez(es).
-[14:35:20] Bidu: au au! (latido 1)
+Abra **http://localhost:8080** no navegador (recarregue algumas vezes) ou:
 
-CONTAINER ID   IMAGEM            COMANDO          CRIADO    STATUS              NOME
-9d8c7b6a5f4e   cachorro:latest   "cachorro.bat"   ha 4 s    Executando ha 4 s   bidu
-7e8f9a0b1c2d   cachorro:latest   "cachorro.bat"   ha 2 min  Executando ha 1 min rex
+```bat
+curl.exe http://localhost:8080/saude
+curl.exe http://localhost:8080/info
+minidocker logs loja
 ```
 
-**O que explicar:** cada `run` cria uma **cópia nova** da imagem. O `bidu` começa do zero ("1 vez") mesmo com o `rex` já tendo sido iniciado duas vezes: um container não enxerga os arquivos do outro. O `-e NOME=Bidu` sobrescreveu a variável que vinha da imagem.
+```text
+ok
+{"visitas":3,"site":"Loja do Grupo","pid":12844,"porta":"8080","versao":"1.0.0 (build 05/11/2026 16:35:55)"}
 
-## 7. Stats e exec: olhando dentro
+[16:35:58] Loja do Grupo v1.0.0 (build 05/11/2026 16:35:55) no ar em http://localhost:8080/ (PID 12844, 0 visita(s) ate agora)
+[16:35:59] GET / 200
+[16:35:59] GET / 200
+[16:35:59] GET /saude 200
+[16:35:59] GET /info 200
+```
+
+**O que explicar:** o `-d` roda em segundo plano, então o terminal fica livre e o site continua no ar. Quem segura o container é um processo auxiliar do MiniDocker (o papel do `containerd-shim` no Docker), não o terminal. O `/saude` é o *health check* que um orquestrador consultaria. O `-m 256m` e o `--cpus 0.5` são limites impostos **pelo kernel** ao grupo de processos do container.
+
+## 5. (Opcional) Stats: consumo medido pelo kernel
+
+Gere carga em outro terminal (ou recarregue o navegador várias vezes) e veja o consumo:
+
+```bat
+for /l %i in (1,1,300) do @curl.exe -s -o nul http://localhost:8080/
+```
 
 ```bat
 minidocker stats
-minidocker exec rex dir
 ```
 
 ```text
-CONTAINER ID   NOME   CPU %   MEM PICO / LIMITE   PROCS / LIMITE   PROCS CRIADOS
-9d8c7b6a5f4e   bidu   0.3%    4.1 MB / -          2 / -            5
-7e8f9a0b1c2d   rex    0.2%    4.2 MB / -          2 / -            21
-
- Pasta de C:\Users\...\.minidocker\containers\rex
-cachorro.bat
-vezes.txt
+CONTAINER ID   NOME   CPU %   MEM PICO / LIMITE    PROCS / LIMITE   PROCS CRIADOS
+3c71bd61237c   loja   9,4%    82,9 MB / 256,0 MB   3 / -            3
 ```
 
-**O que explicar:** o `stats` lê a contabilidade direto do Job Object do Windows — é o kernel quem soma o consumo de todos os processos do container. O `exec` roda mais um comando **dentro** do container: entra no mesmo grupo e enxerga a pasta dele (com o `vezes.txt` que o cachorro gravou).
+**O que explicar:** os números vêm direto do Job Object: é o kernel quem soma o consumo de todos os processos do container. O limite de 256 MB aparece ao lado do pico.
 
-## 8. Rm: agora sim deixa de existir
+## 6. Stop: o site sai do ar, o container fica
 
 ```bat
-minidocker rm -f mingau rex bidu
+minidocker stop loja
+curl.exe http://localhost:8080/saude
+minidocker ps -a
+```
+
+```text
+loja
+curl: (7) Failed to connect to localhost port 8080: Connection refused
+
+CONTAINER ID   IMAGEM       COMANDO          CRIADO    STATUS                NOME
+3c71bd61237c   web:latest   "servidor.bat"   ha 20 s   Parado (137) ha 2 s   loja
+```
+
+**O que explicar:** o `stop` chama `TerminateJobObject`, que mata **todos** os processos do grupo de uma vez (o `cmd.exe` e o PowerShell). O código 137 é o que o Docker mostra para um container morto à força. O site caiu, mas o container `loja` **continua existindo**, com os seus arquivos.
+
+## 7. Start: o mesmo container volta, com os dados
+
+```bat
+minidocker start loja
+curl.exe http://localhost:8080/info
+```
+
+```text
+loja
+{"visitas":304,"site":"Loja do Grupo","pid":23216,"porta":"8080",...}
+```
+
+**O que explicar:** não foi um novo `run`, foi o **mesmo** container. As 304 visitas foram preservadas porque ficam num arquivo dentro do container (`dados\visitas.txt`), e esse arquivo sobreviveu ao `stop`. O PID mudou: o processo é novo, os dados são os mesmos.
+
+## 8. Outro container da mesma imagem
+
+```bat
+minidocker run -d --name filial -e PORTA=8081 -e "NOME_SITE=Filial Centro" web
+curl.exe http://localhost:8081/info
+```
+
+```text
+{"visitas":0,"site":"Filial Centro","pid":22588,"porta":"8081",...}
+```
+
+**O que explicar:** cada `run` cria uma **cópia nova** da imagem. A filial começa com 0 visitas: um container não enxerga os arquivos do outro. O `-e` trocou a porta e o nome sem reconstruir a imagem, que é exatamente para isso que servem as variáveis de ambiente.
+
+E se dois containers tentarem a mesma porta?
+
+```bat
+minidocker run -d --name loja2 web
+minidocker logs loja2
+```
+
+```text
+[16:36:25] ERRO: nao foi possivel abrir a porta 8080. Ela ja esta em uso?
+```
+
+**O que explicar:** a **rede não é isolada**: os containers dividem as portas com o host, como no `--network host` do Docker. Isolar a rede no Windows exige o Host Compute System (ver o README principal).
+
+## 9. Exec: olhando dentro do container
+
+```bat
+minidocker exec loja dir
+minidocker exec loja type dados\visitas.txt
+```
+
+**O que explicar:** o `exec` roda mais um comando **dentro** do container: entra no mesmo grupo de processos, herda os limites e enxerga a pasta dele, com o `visitas.txt` que o site gravou.
+
+## 10. (Opcional) Limites: quem recusa é o kernel
+
+Com pouca memória, o PowerShell nem consegue subir:
+
+```bat
+minidocker run -d --name apertado -m 20m -e PORTA=8082 web
+minidocker ps -a
+```
+
+```text
+7cfc2f1b02e9   web:latest   "servidor.bat"   ha 5 s   Finalizado (-65536) ha 5 s   apertado
+```
+
+O `logs apertado` mostra a falha de memória: *“O arquivo de paginação é muito pequeno para que esta operação seja concluída”*. O texto sai espaçado porque o PowerShell grava esse erro em UTF-16.
+
+Com limite de processos, o site funciona, mas o `exec` é barrado:
+
+```bat
+minidocker run -d --name travado --pids-limit 2 -e PORTA=8083 web
+minidocker exec travado dir
+```
+
+```text
+Erro: Nao foi possivel atribuir o processo ao Job Object.
+```
+
+**O que explicar:** não é o MiniDocker conferindo nada: o Windows recusou a memória e recusou o processo extra. A saída do `dir` ainda pode aparecer antes do erro, porque o processo roda por um instante antes de ser colocado no grupo. A criação suspensa (`CREATE_SUSPENDED`), planejada na Etapa 3, fecha essa janela.
+
+## 11. Rm: agora sim deixa de existir
+
+```bat
+minidocker rm -f loja filial loja2 apertado travado relatorio-outubro relatorio-erro
 minidocker ps -a
 minidocker images
 ```
 
-```text
-mingau
-rex
-bidu
-
-CONTAINER ID   IMAGEM   COMANDO   CRIADO   STATUS   NOME
-
-REPOSITORIO   TAG      IMAGE ID       CRIADA    TAMANHO
-cachorro      latest   6b8fdde4ea60   ha 4 min  555 B
-gato          latest   3f9a1c2b7d10   ha 4 min  412 B
-```
-
-**O que explicar:** o `rm` apaga o registro, a pasta e o log dos containers (`-f` para os que ainda estão rodando). As **imagens continuam** — dá para criar novos containers delas a qualquer momento.
+**O que explicar:** o `rm` apaga o registro, a pasta e o log de cada container, incluindo as 304 visitas e o relatório gerado. As **imagens continuam**: dá para criar containers novos delas a qualquer momento.
 
 ## Resumo para fechar
 
-**Imagem = receita. Container = bolo feito da receita. Processo = bolo no forno.**
+**Imagem = o molde (código + configuração). Container = uma instância com seus próprios dados. Processo = o programa rodando agora.**
 
 | Comando | Processos | Arquivos do container | Container |
 |---|---|---|---|
 | `run` | Nascem | Cópia nova da imagem | Um container **novo** |
-| `stop` | Morrem | Ficam | Continua existindo (`Parado`) |
-| `start` | Nascem de novo, do zero | Os mesmos de antes | O mesmo |
+| `stop` | Morrem | Ficam (as visitas continuam lá) | Continua existindo (`Parado`) |
+| `start` | Nascem de novo, do zero (PID novo) | Os mesmos de antes | O mesmo |
 | `rm` | — | Apagados | Deixa de existir |

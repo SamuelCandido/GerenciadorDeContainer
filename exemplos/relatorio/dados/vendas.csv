@@ -1,0 +1,16 @@
+data,regiao,produto,quantidade,preco_unitario
+2026-10-01,Sul,Notebook,2,3899.90
+2026-10-01,Sudeste,Monitor,5,1199.00
+2026-10-02,Nordeste,Teclado,12,149.90
+2026-10-03,Sudeste,Notebook,3,3899.90
+2026-10-04,Norte,Mouse,20,79.90
+2026-10-05,Sul,Monitor,4,1199.00
+2026-10-07,Centro-Oeste,Notebook,1,3899.90
+2026-10-08,Sudeste,Teclado,8,149.90
+2026-10-10,Nordeste,Notebook,2,3899.90
+2026-10-12,Sul,Mouse,15,79.90
+2026-10-15,Sudeste,Monitor,6,1199.00
+2026-10-18,Norte,Teclado,5,149.90
+2026-10-21,Centro-Oeste,Monitor,2,1199.00
+2026-10-25,Sudeste,Notebook,4,3899.90
+2026-10-30,Nordeste,Mouse,10,79.90

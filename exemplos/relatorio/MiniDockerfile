@@ -1,0 +1,12 @@
+# Job de relatorio de vendas: le um CSV, calcula os totais, grava o relatorio
+# e termina. Como um job agendado, uma migracao de banco ou um passo de CI.
+# Para construir (na raiz do repositorio):
+#   minidocker build -t relatorio exemplos\relatorio
+FROM scratch
+COPY relatorio.ps1 .
+COPY relatorio.bat .
+COPY dados dados
+ENV ARQUIVO=dados\vendas.csv
+# Roda AGORA, no build: a pasta de saida ja nasce dentro da imagem.
+RUN mkdir saida
+CMD relatorio.bat

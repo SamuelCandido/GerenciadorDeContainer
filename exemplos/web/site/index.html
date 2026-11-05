@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>{{NOME}}</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #f4f6f8; color: #1d1f24; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  .cartao { background: #fff; border-radius: 12px; padding: 32px 40px; box-shadow: 0 2px 12px rgba(0,0,0,.08); text-align: center; }
+  .visitas { font-size: 3.5rem; font-weight: 700; color: #1f6f5c; margin: 8px 0; }
+  .rodape { color: #5d6370; font-size: .85rem; margin-top: 20px; }
+</style>
+</head>
+<body>
+  <div class="cartao">
+    <h1>{{NOME}}</h1>
+    <p>Esta página está sendo servida de dentro de um container do MiniDocker.</p>
+    <div class="visitas">{{VISITAS}}</div>
+    <p>visita(s) neste container</p>
+    <p class="rodape">versão {{VERSAO}} · porta {{PORTA}} · PID {{PID}}</p>
+  </div>
+</body>
+</html>

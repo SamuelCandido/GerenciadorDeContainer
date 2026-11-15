@@ -45,6 +45,35 @@ public class ServicoConteinerTestes : IDisposable
     }
 
     [FatoWindows]
+    public void ProcessoRapidoTambemEContabilizadoNoGrupo()
+    {
+        // Criado suspenso, o processo entra no job antes de executar qualquer
+        // instrução. Até um "echo", que termina em milissegundos, é contado.
+        var conteiner = servico.Executar("c1", "scratch", "echo rapido");
+
+        Assert.True(conteiner.TotalProcessos >= 1);
+    }
+
+    [FatoWindows]
+    public void ContainerConfinadoNaoEscreveForaDoRootfs()
+    {
+        var fora = Path.Combine(diretorioTemporario, "fora");
+        Directory.CreateDirectory(fora);
+        var alvo = Path.Combine(fora, "invasao.txt");
+
+        var confinado = servico.Executar("c1", "scratch", $"echo x> \"{alvo}\" & echo y> dentro.txt");
+
+        Assert.False(File.Exists(alvo));
+        Assert.True(File.Exists(Path.Combine(confinado.CaminhoRootFs, "dentro.txt")));
+
+        var privilegiado = servico.Executar("c2", "scratch", $"echo x> \"{alvo}\"",
+            new OpcoesConteiner { Privilegiado = true });
+
+        Assert.Equal(0, privilegiado.CodigoSaida);
+        Assert.True(File.Exists(alvo));
+    }
+
+    [FatoWindows]
     public void ContainerNaoHerdaVariaveisDeAmbienteDoHost()
     {
         Environment.SetEnvironmentVariable("SEGREDO_DO_HOST", "senha-do-host-123");

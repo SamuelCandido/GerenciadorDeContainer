@@ -4,8 +4,19 @@ namespace MiniDocker.Nucleo.Servicos;
 
 public interface IServicoImagem
 {
-    /// <summary><c>docker build -t referencia contexto</c>.</summary>
-    Imagem Construir(string contexto, string referencia, string? arquivo = null, Action<string>? saida = null);
+    /// <summary>
+    /// <c>docker build -t referencia pasta</c>. Sem MiniDockerfile na pasta, ela
+    /// inteira vira a imagem e o comando é o único programa encontrado nela.
+    /// </summary>
+    /// <param name="comando"><c>--cmd</c>: o comando padrão, por cima de qualquer <c>CMD</c>.</param>
+    /// <param name="ambiente"><c>-e</c>: variáveis, por cima de qualquer <c>ENV</c>.</param>
+    Imagem Construir(
+        string contexto,
+        string referencia,
+        string? arquivo = null,
+        Action<string>? saida = null,
+        string? comando = null,
+        IReadOnlyDictionary<string, string>? ambiente = null);
 
     IReadOnlyList<Imagem> Listar();
 

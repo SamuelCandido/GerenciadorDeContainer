@@ -1,0 +1,9 @@
+2026-11-14 08:00:01 INFO  servidor iniciado na porta 8080
+2026-11-14 08:00:02 INFO  conexao com o banco estabelecida
+2026-11-14 08:15:47 AVISO tempo de resposta alto em /pedidos: 1830 ms
+2026-11-14 09:02:13 INFO  usuario 1042 autenticado
+2026-11-14 09:02:14 ERRO  falha ao gravar pedido 5531: timeout no banco
+2026-11-14 09:02:20 INFO  nova tentativa do pedido 5531 concluida
+2026-11-14 10:30:00 AVISO uso de memoria em 85%
+2026-11-14 11:45:09 ERRO  certificado do gateway de pagamento expira em 3 dias
+2026-11-14 12:00:00 INFO  rotina de limpeza executada

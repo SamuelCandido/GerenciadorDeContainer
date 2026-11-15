@@ -7,6 +7,7 @@ using MiniDocker.Nucleo.Servicos;
 
 var servico = new ServicoConteiner();
 var imagens = new ServicoImagem();
+var volumes = new ServicoVolume();
 
 try
 {
@@ -55,6 +56,16 @@ try
 			return Salvar(resto);
 		case "load":
 			return Carregar(resto);
+		case "volume":
+			return Volume(resto);
+		case "scale":
+			return Escalar(resto);
+		case "events":
+			return Eventos(resto);
+		case "port":
+			return Portas(resto);
+		case "compose":
+			return Compose(resto);
 		case "__shim":
 			return Shim(resto);
 		default:
@@ -71,9 +82,12 @@ catch (Exception excecao)
 
 int CriarOuExecutar(string[] argumentos, bool executar)
 {
-	string[] flags = executar ? ["-d", "--detach", "--rm", "-i", "-t", "-it"] : ["--rm"];
+	string[] flags = executar
+		? ["-d", "--detach", "--rm", "-i", "-t", "-it", "--privileged"]
+		: ["--rm", "--privileged"];
 	var linha = LinhaComando.Analisar(argumentos, flags,
-		["--name", "-e", "--env", "-m", "--memory", "--cpus", "--pids-limit"],
+		["--name", "-e", "--env", "-m", "--memory", "--cpus", "--pids-limit", "-v", "--volume",
+			"--restart", "--replicas", "-p", "--publish"],
 		pararNoPosicional: true);
 
 	if (linha.Posicionais.Count == 0)
@@ -92,9 +106,24 @@ int CriarOuExecutar(string[] argumentos, bool executar)
 	{
 		Limites = LerLimites(linha),
 		Ambiente = LerAmbiente(linha),
-		RemoverAoFinalizar = linha.Tem("--rm")
+		RemoverAoFinalizar = linha.Tem("--rm"),
+		Volumes = linha.Valores("-v", "--volume").ToList(),
+		Portas = linha.Valores("-p", "--publish").ToList(),
+		Privilegiado = linha.Tem("--privileged"),
+		Reinicio = linha.Valor("--restart") is { } reinicio ? PoliticaReinicio.Interpretar(reinicio) : PoliticaReinicio.Nunca
 	};
 	var comando = linha.Posicionais.Count > 1 ? string.Join(' ', linha.Posicionais.Skip(1)) : null;
+
+	if (linha.Valor("--replicas") is { } textoReplicas)
+	{
+		if (executar && !desanexado)
+		{
+			throw new ArgumentException("--replicas roda em segundo plano: use run -d --replicas N.");
+		}
+
+		return CriarReplicas(linha, opcoes, comando, textoReplicas, iniciar: executar);
+	}
+
 	var conteiner = servico.Criar(linha.Valor("--name"), linha.Posicionais[0], comando, opcoes);
 
 	if (!executar)
@@ -111,6 +140,116 @@ int CriarOuExecutar(string[] argumentos, bool executar)
 	}
 
 	return IniciarAnexado(conteiner.Nome, interativo);
+}
+
+// --replicas N: N containers iguais, GRUPO-1..GRUPO-N, todos em segundo plano.
+int CriarReplicas(LinhaComando linha, OpcoesConteiner opcoes, string? comando, string texto, bool iniciar)
+{
+	var grupo = linha.Valor("--name")
+		?? throw new ArgumentException("Com --replicas, informe o nome do grupo com --name.");
+	if (!int.TryParse(texto, out var quantidade) || quantidade < 1)
+	{
+		throw new ArgumentException($"--replicas invalido: '{texto}'.");
+	}
+
+	ServicoConteiner.ValidarPortasDoGrupo(opcoes.Portas.Select(MapeamentoPorta.Interpretar), quantidade);
+
+	if (servico.ListarGrupo(grupo).Count > 0)
+	{
+		throw new InvalidOperationException($"O grupo '{grupo}' ja existe. Use: minidocker scale {grupo}={quantidade}");
+	}
+
+	var replicas = new List<Conteiner>();
+	for (var indice = 1; indice <= quantidade; indice++)
+	{
+		replicas.Add(servico.Criar(ServicoConteiner.NomeReplica(grupo, indice), linha.Posicionais[0], comando,
+			opcoes with { Grupo = grupo }));
+	}
+
+	foreach (var replica in replicas)
+	{
+		if (iniciar)
+		{
+			IniciarEmSegundoPlano(replica);
+		}
+
+		Console.WriteLine(replica.Nome);
+	}
+
+	return 0;
+}
+
+int Escalar(string[] argumentos)
+{
+	if (argumentos.Length == 0)
+	{
+		throw new ArgumentException("Uso: minidocker scale GRUPO=N [GRUPO=N...]");
+	}
+
+	foreach (var pedido in argumentos)
+	{
+		var igual = pedido.IndexOf('=');
+		if (igual <= 0 || !int.TryParse(pedido[(igual + 1)..], out var quantidade))
+		{
+			throw new ArgumentException($"Uso: minidocker scale GRUPO=N (recebido '{pedido}').");
+		}
+
+		var grupo = pedido[..igual];
+		var antes = servico.ListarGrupo(grupo).Select(c => c.Nome).ToHashSet();
+		var novas = servico.Escalar(grupo, quantidade);
+
+		foreach (var removida in antes.Except(servico.ListarGrupo(grupo).Select(c => c.Nome)))
+		{
+			Console.WriteLine($"- {removida} removida");
+		}
+
+		// Sobe as novas e também as que estavam paradas: o grupo fica com N rodando.
+		foreach (var replica in servico.ListarGrupo(grupo).Where(c => c.Estado != EstadoConteiner.Executando))
+		{
+			IniciarEmSegundoPlano(replica);
+			Console.WriteLine(novas.Any(n => n.Nome == replica.Nome) ? $"+ {replica.Nome} criada" : $"> {replica.Nome} iniciada");
+		}
+
+		Console.WriteLine($"{grupo}: {servico.ListarGrupo(grupo).Count} replica(s)");
+	}
+
+	return 0;
+}
+
+int Eventos(string[] argumentos)
+{
+	var linha = LinhaComando.Analisar(argumentos, ["-f", "--follow", "--erros"], []);
+	var filtro = linha.Posicionais.ToHashSet();
+	var soErros = linha.Tem("--erros");
+	var registro = new RegistroEventos();
+
+	void Imprimir(Evento evento)
+	{
+		if ((filtro.Count == 0 || filtro.Contains(evento.Conteiner)) && (!soErros || evento.EhErro))
+		{
+			Console.WriteLine(evento.EhErro ? $"{evento}  <<<" : evento.ToString());
+		}
+	}
+
+	var posicao = registro.Ler(0, Imprimir);
+	if (!linha.Tem("-f", "--follow"))
+	{
+		return 0;
+	}
+
+	using var cancelamento = new CancellationTokenSource();
+	Console.CancelKeyPress += (_, evento) =>
+	{
+		evento.Cancel = true;
+		cancelamento.Cancel();
+	};
+
+	while (!cancelamento.Token.WaitHandle.WaitOne(300))
+	{
+		posicao = registro.Ler(posicao, Imprimir);
+	}
+
+	return 0;
 }
 
 int Iniciar(string[] argumentos)
@@ -260,23 +399,40 @@ int Listar(string[] argumentos)
 		return 0;
 	}
 
-	ImprimirTabela(
-		["CONTAINER ID", "IMAGEM", "COMANDO", "CRIADO", "STATUS", "NOME"],
-		conteineres.Select(c => new[]
-		{
-			c.Id, c.Imagem, $"\"{Truncar(c.Comando, 24)}\"", $"ha {Decorrido(c.CriadoEm)}", Status(c), c.Nome
-		}));
+	ImprimirConteineres(conteineres);
 	return 0;
 }
 
 int Logs(string[] argumentos)
 {
-	var linha = LinhaComando.Analisar(argumentos, ["-f", "--follow"], []);
-	if (linha.Posicionais.Count != 1)
+	var linha = LinhaComando.Analisar(argumentos, ["-f", "--follow", "-t", "--timestamps"], []);
+	if (linha.Posicionais.Count == 0)
 	{
-		throw new ArgumentException("Uso: minidocker logs [-f] CONTAINER");
+		throw new ArgumentException("Uso: minidocker logs [-f] [-t] CONTAINER|GRUPO...");
 	}
 
+	// Um nome que nao e container pode ser um grupo de replicas: entram todas.
+	var nomes = new List<string>();
+	foreach (var nome in linha.Posicionais)
+	{
+		try
+		{
+			nomes.Add(servico.Obter(nome).Nome);
+		}
+		catch (InvalidOperationException) when (servico.ListarGrupo(nome) is { Count: > 0 } grupo)
+		{
+			nomes.AddRange(grupo.Select(c => c.Nome));
+		}
+	}
+
+	MostrarLogs(nomes, linha.Tem("-f", "--follow"), linha.Tem("-t", "--timestamps"));
+	return 0;
+}
+
+// Com mais de um container, cada linha ganha o nome de quem a escreveu, numa
+// cor por container, como o docker compose logs.
+void MostrarLogs(IReadOnlyList<string> nomes, bool seguir, bool horario)
+{
 	using var cancelamento = new CancellationTokenSource();
 	Console.CancelKeyPress += (_, evento) =>
 	{
@@ -284,8 +440,128 @@ int Logs(string[] argumentos)
 		cancelamento.Cancel();
 	};
 
-	servico.LerLogs(linha.Posicionais[0], linha.Tem("-f", "--follow"), Console.WriteLine, cancelamento.Token);
+	ConsoleColor[] cores = [ConsoleColor.Cyan, ConsoleColor.Yellow, ConsoleColor.Green, ConsoleColor.Magenta, ConsoleColor.Blue, ConsoleColor.Red];
+	var largura = nomes.Max(n => n.Length);
+	var varios = nomes.Count > 1;
+
+	servico.LerLogs(nomes, seguir, linhaLog =>
+	{
+		var momento = horario && linhaLog.Momento is { } m ? $"{m.ToLocalTime():HH:mm:ss.fff} " : "";
+		if (varios)
+		{
+			Console.ForegroundColor = cores[IndiceDe(nomes, linhaLog.Conteiner) % cores.Length];
+			Console.Write($"{linhaLog.Conteiner.PadRight(largura)} | ");
+			Console.ResetColor();
+		}
+
+		Console.WriteLine(momento + linhaLog.Texto);
+	}, cancelamento.Token);
+}
+
+static int IndiceDe(IReadOnlyList<string> lista, string item)
+{
+	for (var i = 0; i < lista.Count; i++)
+	{
+		if (lista[i] == item)
+		{
+			return i;
+		}
+	}
+
 	return 0;
+}
+
+int Portas(string[] argumentos)
+{
+	if (argumentos.Length != 1)
+	{
+		throw new ArgumentException("Uso: minidocker port CONTAINER");
+	}
+
+	var conteiner = servico.Obter(argumentos[0]);
+	if (conteiner.Estado != EstadoConteiner.Executando)
+	{
+		throw new InvalidOperationException($"O container '{conteiner.Nome}' nao esta em execucao.");
+	}
+
+	foreach (var porta in conteiner.Portas)
+	{
+		Console.WriteLine($"{porta.PortaContainer}/tcp -> {porta.Ip}:{porta.PortaHostAtual}   (interna {porta.PortaInterna})");
+	}
+
+	return 0;
+}
+
+int Compose(string[] argumentos)
+{
+	var linha = LinhaComando.Analisar(argumentos, ["-f", "--follow", "-t", "--timestamps"], ["--file", "-F"]);
+	var arquivo = linha.Valor("--file", "-F") ?? MiniDocker.Nucleo.Compose.ArquivoCompose.NomePadrao;
+	var subcomando = linha.Posicionais.Count > 0 ? linha.Posicionais[0] : "";
+	var definicao = MiniDocker.Nucleo.Compose.ArquivoCompose.Ler(arquivo);
+	var compose = new MiniDocker.Nucleo.Compose.ServicoCompose(servico, imagens);
+
+	switch (subcomando)
+	{
+		case "up":
+			Console.WriteLine($"Projeto {definicao.Projeto}: {string.Join(" -> ", definicao.Servicos.Select(s => s.Nome))}");
+			foreach (var conteiner in compose.Subir(definicao, Console.WriteLine))
+			{
+				if (servico.Obter(conteiner.Nome).Estado != EstadoConteiner.Executando)
+				{
+					IniciarEmSegundoPlano(servico.Obter(conteiner.Nome));
+					Console.WriteLine($"[{conteiner.Grupo}] {conteiner.Nome} iniciado");
+				}
+			}
+
+			ImprimirConteineres(compose.ListarProjeto(definicao.Projeto));
+			return 0;
+
+		case "down":
+			foreach (var nome in compose.Derrubar(definicao.Projeto))
+			{
+				Console.WriteLine($"{nome} removido");
+			}
+
+			Console.WriteLine("Volumes e imagens foram mantidos.");
+			return 0;
+
+		case "ps":
+			ImprimirConteineres(compose.ListarProjeto(definicao.Projeto));
+			return 0;
+
+		case "logs":
+			var nomes = compose.ListarProjeto(definicao.Projeto).Select(c => c.Nome).ToList();
+			if (linha.Posicionais.Count > 1)
+			{
+				var servicos = linha.Posicionais.Skip(1).ToHashSet();
+				nomes = compose.ListarProjeto(definicao.Projeto)
+					.Where(c => c.Grupo is not null && servicos.Contains(c.Grupo)).Select(c => c.Nome).ToList();
+			}
+
+			if (nomes.Count == 0)
+			{
+				throw new InvalidOperationException($"O projeto '{definicao.Projeto}' nao tem containers. Use: minidocker compose up");
+			}
+
+			MostrarLogs(nomes, linha.Tem("-f", "--follow"), linha.Tem("-t", "--timestamps"));
+			return 0;
+
+		case "config":
+			Console.WriteLine($"projeto: {definicao.Projeto}  (pasta {definicao.Diretorio})");
+			foreach (var s in definicao.Servicos)
+			{
+				Console.WriteLine($"[{s.Nome}] imagem={s.Imagem} replicas={s.Replicas}"
+					+ (s.Build is { } b ? $" build={b}" : "")
+					+ (s.Portas.Count > 0 ? $" portas={string.Join(",", s.Portas)}" : "")
+					+ (s.Volumes.Count > 0 ? $" volumes={string.Join(",", s.Volumes)}" : "")
+					+ (s.DependeDe.Count > 0 ? $" depende={string.Join(",", s.DependeDe)}" : ""));
+			}
+
+			return 0;
+
+		default:
+			throw new ArgumentException("Uso: minidocker compose [--file ARQUIVO] up | down | ps | logs [-f] [SERVICO...] | config");
+	}
 }
 
 int Exec(string[] argumentos)
@@ -378,14 +654,47 @@ int Inspecionar(string[] argumentos)
 
 int Build(string[] argumentos)
 {
-	var linha = LinhaComando.Analisar(argumentos, [], ["-t", "--tag", "-f", "--file"]);
+	var linha = LinhaComando.Analisar(argumentos, [], ["-t", "--tag", "-f", "--file", "--cmd", "-e", "--env"]);
 	var referencia = linha.Valor("-t", "--tag")
-		?? throw new ArgumentException("Informe o nome da imagem com -t. Ex.: minidocker build -t app .");
+		?? throw new ArgumentException("Informe o nome da imagem com -t. Ex.: minidocker build -t app PASTA");
 	var contexto = linha.Posicionais.Count > 0 ? linha.Posicionais[0] : ".";
 
-	var imagem = imagens.Construir(contexto, referencia, linha.Valor("-f", "--file"), Console.WriteLine);
+	var imagem = imagens.Construir(contexto, referencia, linha.Valor("-f", "--file"), Console.WriteLine,
+		linha.Valor("--cmd"), LerAmbiente(linha));
 	Console.WriteLine($"Imagem {imagem.Id} construida como {imagem.Referencia}");
+	Console.WriteLine(imagem.Comando is { } cmd
+		? $"Comando padrao: {cmd}"
+		: $"Aviso: a imagem nao tem comando padrao. Informe no run (minidocker run {imagem.Repositorio} COMANDO) ou use --cmd no build.");
 	return 0;
+}
+
+int Volume(string[] argumentos)
+{
+	var subcomando = argumentos.Length > 0 ? argumentos[0] : "ls";
+	var resto = argumentos.Length > 0 ? argumentos[1..] : [];
+
+	switch (subcomando)
+	{
+		case "ls":
+			ImprimirTabela(
+				["VOLUME", "TAMANHO", "USADO POR", "CAMINHO"],
+				volumes.Listar().Select(v => new[]
+				{
+					v.Nome, FormatarBytes(v.TamanhoBytes),
+					v.Conteineres.Count > 0 ? string.Join(",", v.Conteineres) : "-", v.Caminho
+				}));
+			return 0;
+		case "create":
+			return ParaCada(resto, nome => volumes.Criar(nome));
+		case "rm":
+			return ParaCada(resto, volumes.Remover);
+		case "inspect":
+			var opcoes = new JsonSerializerOptions { WriteIndented = true };
+			Console.WriteLine(JsonSerializer.Serialize(resto.Select(volumes.Obter).ToList(), opcoes));
+			return 0;
+		default:
+			throw new ArgumentException($"Uso: minidocker volume ls | create NOME | rm NOME | inspect NOME");
+	}
 }
 
 int ListarImagens(string[] argumentos)
@@ -404,10 +713,11 @@ int ListarImagens(string[] argumentos)
 	}
 
 	ImprimirTabela(
-		["REPOSITORIO", "TAG", "IMAGE ID", "CRIADA", "TAMANHO"],
+		["REPOSITORIO", "TAG", "IMAGE ID", "COMANDO", "CRIADA", "TAMANHO"],
 		lista.Select(i => new[]
 		{
-			i.Repositorio, i.Tag, i.Id, $"ha {Decorrido(i.CriadaEm)}", FormatarBytes(i.TamanhoBytes)
+			i.Repositorio, i.Tag, i.Id, i.Comando is { } c ? $"\"{Truncar(c, 24)}\"" : "-",
+			$"ha {Decorrido(i.CriadaEm)}", FormatarBytes(i.TamanhoBytes)
 		}));
 	return 0;
 }
@@ -481,11 +791,9 @@ static LimitesRecursos LerLimites(LinhaComando linha)
 {
 	return new LimitesRecursos
 	{
-		MemoriaMaximaBytes = linha.Valor("-m", "--memory") is { } memoria ? LerBytes(memoria) : null,
-		PercentualMaximoCpu = linha.Valor("--cpus") is { } cpus ? LerPercentualCpu(cpus) : null,
-		ProcessosMaximos = linha.Valor("--pids-limit") is { } processos
-			? int.TryParse(processos, out var n) ? n : throw new ArgumentException($"--pids-limit invalido: '{processos}'.")
-			: null
+		MemoriaMaximaBytes = linha.Valor("-m", "--memory") is { } memoria ? Unidades.LerBytes(memoria) : null,
+		PercentualMaximoCpu = linha.Valor("--cpus") is { } cpus ? Unidades.LerPercentualCpu(cpus) : null,
+		ProcessosMaximos = linha.Valor("--pids-limit") is { } processos ? Unidades.LerInteiro(processos, "--pids-limit") : null
 	};
 }
 
@@ -510,47 +818,28 @@ static Dictionary<string, string> LerAmbiente(LinhaComando linha)
 	return ambiente;
 }
 
-// Aceita o formato do Docker: 512k, 256m, 1g (ou com "b" no fim).
-static long LerBytes(string texto)
+static void ImprimirConteineres(IEnumerable<Conteiner> conteineres)
 {
-	var valor = texto.Trim().ToLowerInvariant().TrimEnd('b');
-	long multiplicador = 1;
-	if (valor.Length > 0 && valor[^1] is 'k' or 'm' or 'g')
-	{
-		multiplicador = valor[^1] switch { 'k' => 1L << 10, 'm' => 1L << 20, _ => 1L << 30 };
-		valor = valor[..^1];
-	}
-
-	if (!long.TryParse(valor, out var numero) || numero <= 0)
-	{
-		throw new ArgumentException($"Memoria invalida: '{texto}'. Exemplos: 256m, 1g.");
-	}
-
-	return numero * multiplicador;
-}
-
-// O Docker mede CPU em núcleos (--cpus 0.5 = meio núcleo); o Job Object, em
-// percentual da máquina inteira. A conversão divide pelo número de núcleos.
-static int LerPercentualCpu(string texto)
-{
-	if (!double.TryParse(texto, NumberStyles.Float, CultureInfo.InvariantCulture, out var cpus) || cpus <= 0)
-	{
-		throw new ArgumentException($"--cpus invalido: '{texto}'. Exemplo: 0.5");
-	}
-
-	var nucleos = Environment.ProcessorCount;
-	if (cpus > nucleos)
-	{
-		throw new ArgumentException($"--cpus {texto} excede os {nucleos} nucleos desta maquina.");
-	}
-
-	return Math.Clamp((int)Math.Ceiling(cpus / nucleos * 100), 1, 100);
+	ImprimirTabela(
+		["CONTAINER ID", "IMAGEM", "COMANDO", "CRIADO", "STATUS", "PORTAS", "NOME"],
+		conteineres.Select(c => new[]
+		{
+			c.Id, c.Imagem, $"\"{Truncar(c.Comando, 24)}\"", $"ha {Decorrido(c.CriadoEm)}", Status(c),
+			c.Estado == EstadoConteiner.Executando && c.Portas.Count > 0
+				? string.Join(", ", c.Portas.Select(p => p.Descrever())) : "",
+			c.Nome
+		}));
 }
 
 static string Status(Conteiner conteiner) => conteiner.Estado switch
 {
+	EstadoConteiner.Executando when conteiner.Reinicios > 0 =>
+		$"Executando ha {Decorrido(conteiner.IniciadoEm)}, {conteiner.Reinicios} reinicio(s) - ultimo: {conteiner.MotivoTermino}",
 	EstadoConteiner.Executando => $"Executando ha {Decorrido(conteiner.IniciadoEm)}",
 	EstadoConteiner.Criado => "Criado",
+	EstadoConteiner.Parado => $"Parado ({conteiner.CodigoSaida?.ToString() ?? "?"}) ha {Decorrido(conteiner.FinalizadoEm)}",
+	_ when conteiner.MotivoTermino is { } motivo =>
+		$"{conteiner.Estado} ({conteiner.CodigoSaida?.ToString() ?? "?"}: {motivo}) ha {Decorrido(conteiner.FinalizadoEm)}",
 	_ => $"{conteiner.Estado} ({conteiner.CodigoSaida?.ToString() ?? "?"}) ha {Decorrido(conteiner.FinalizadoEm)}"
 };
 
@@ -611,6 +900,13 @@ static void ExibirAjuda()
 		      -m, --memory 256m             limite de memoria
 		      --cpus 0.5                    limite de CPU, em nucleos
 		      --pids-limit 10               limite de processos vivos
+		      -v PASTA:DESTINO              monta uma pasta do host no container (repetivel)
+		      -v VOLUME:DESTINO             monta um volume nomeado (criado se nao existir)
+		      --privileged                  sem confinamento: pode escrever fora do container
+		      --restart on-failure[:N]      reinicia se terminar com erro (always: sempre)
+		      --replicas N                  cria N copias (NOME-1..NOME-N); exige -d e --name
+		      -p 8080:80                    publica a porta 80 do container em 127.0.0.1:8080
+		      -p 80                         idem, numa porta do host sorteada
 		      --rm                          remove o container ao terminar
 		  create [OPCOES] IMAGEM [COMANDO] Cria sem executar
 		  start [-a] CONTAINER...          Inicia (em segundo plano; -a anexa)
@@ -618,22 +914,47 @@ static void ExibirAjuda()
 		  restart CONTAINER...             Para e inicia de novo
 		  rm [-f] CONTAINER...             Remove (-f para antes, se preciso)
 		  ps [-a] [-q]                     Lista os em execucao (-a: todos)
-		  logs [-f] CONTAINER              Mostra a saida (-f: acompanha)
+		  logs [-f] [-t] NOME...           Mostra a saida (-f: acompanha; -t: horario)
+		                                   NOME pode ser um grupo: junta as replicas
+		  port CONTAINER                   Portas publicadas
 		  exec CONTAINER COMANDO           Executa um comando dentro do container
 		  stats [CONTAINER...]             Consumo ao vivo, lido do Job Object
 		  inspect NOME...                  Detalhes em JSON (container ou imagem)
+		  scale GRUPO=N                    Ajusta o numero de replicas de um grupo
+		  events [-f] [--erros] [NOME...]  Historico de eventos e erros (-f: acompanha)
 
 		Imagens:
-		  build -t NOME[:TAG] [-f ARQUIVO] [CONTEXTO]   Constroi a partir do MiniDockerfile
+		  build -t NOME[:TAG] PASTA        Transforma a pasta numa imagem
+		      --cmd COMANDO                 comando padrao (sem isso: o unico .bat/.cmd/.exe da pasta)
+		      -e CHAVE=valor                variavel padrao (repetivel)
+		      -f ARQUIVO                    usa um MiniDockerfile (opcional; so para RUN/FROM)
 		  images [-q]                      Lista as imagens
 		  rmi IMAGEM...                    Remove imagens
 		  commit CONTAINER NOME[:TAG]      Cria uma imagem a partir de um container
 		  save -o ARQUIVO.zip IMAGEM       Exporta uma imagem
 		  load -i ARQUIVO.zip              Importa uma imagem
 
+		Compose (arquivo minicompose.ini; outro com --file ARQUIVO):
+		  compose up                       Constroi, cria e inicia todos os servicos
+		  compose down                     Para e remove os containers do projeto
+		  compose ps                       Containers do projeto
+		  compose logs [-f] [SERVICO...]   Logs de todos os servicos, juntos
+		  compose config                   Mostra o arquivo interpretado
+
+		Volumes:
+		  volume ls                       Lista os volumes nomeados
+		  volume create NOME...            Cria volumes
+		  volume rm NOME...                Remove volumes (e os dados) que nenhum container usa
+		  volume inspect NOME...           Detalhes em JSON
+
 		A imagem "scratch" e embutida e vazia.
 
 		Exemplos:
+		  minidocker build -t backup exemplos\backup
+		  minidocker run --rm -v C:\docs:origem:ro -v backups:destino backup
+		  minidocker run -d --replicas 3 --name worker -v C:\fila:fila --restart on-failure:3 processador
+		  minidocker events --erros
+		  cd exemplos & minidocker compose up
 		  minidocker run scratch echo ola
 		  minidocker run -d --name web --cpus 0.5 scratch ping -t 127.0.0.1
 		  minidocker logs -f web

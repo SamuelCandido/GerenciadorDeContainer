@@ -28,3 +28,6 @@ coverage*.xml
 # Sistema operacional
 .DS_Store
 Thumbs.db
+
+# Fila criada pelo exemplo do compose
+exemplos/fila/

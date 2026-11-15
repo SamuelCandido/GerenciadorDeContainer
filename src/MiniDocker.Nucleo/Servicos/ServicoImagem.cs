@@ -26,17 +26,45 @@ public class ServicoImagem : IServicoImagem
         Directory.CreateDirectory(raizImagens);
     }
 
-    public Imagem Construir(string contexto, string referencia, string? arquivo = null, Action<string>? saida = null)
+    public Imagem Construir(
+        string contexto,
+        string referencia,
+        string? arquivo = null,
+        Action<string>? saida = null,
+        string? comando = null,
+        IReadOnlyDictionary<string, string>? ambiente = null)
     {
         var (nomeRepositorio, tag) = ReferenciaImagem.Separar(referencia);
         contexto = Path.GetFullPath(contexto);
         if (!Directory.Exists(contexto))
         {
-            throw new DirectoryNotFoundException($"Contexto de build '{contexto}' nao existe.");
+            throw new DirectoryNotFoundException($"Pasta '{contexto}' nao existe.");
         }
 
-        var instrucoes = ArquivoBuild.Ler(arquivo ?? Path.Combine(contexto, ArquivoBuild.NomePadrao));
         saida ??= _ => { };
+        var miniDockerfile = arquivo ?? Path.Combine(contexto, ArquivoBuild.NomePadrao);
+        var instrucoes = new List<InstrucaoBuild>();
+
+        if (arquivo is null && !File.Exists(miniDockerfile))
+        {
+            saida("Sem MiniDockerfile: a pasta inteira vira a imagem.");
+            instrucoes.AddRange(ArquivoBuild.Implicito(contexto, detectarComando: comando is null));
+        }
+        else
+        {
+            instrucoes.AddRange(ArquivoBuild.Ler(miniDockerfile));
+        }
+
+        // --cmd e -e valem por cima do que a pasta ou o MiniDockerfile definirem.
+        foreach (var (chave, valor) in ambiente ?? new Dictionary<string, string>())
+        {
+            instrucoes.Add(new InstrucaoBuild("ENV", $"{chave}={valor}", 0));
+        }
+
+        if (!string.IsNullOrWhiteSpace(comando))
+        {
+            instrucoes.Add(new InstrucaoBuild("CMD", comando, 0));
+        }
 
         var imagem = new Imagem { Repositorio = nomeRepositorio, Tag = tag };
         var diretorioTemporario = Path.Combine(raizImagens, $".build-{Guid.NewGuid():N}");
@@ -241,9 +269,12 @@ public class ServicoImagem : IServicoImagem
     /// </summary>
     private static void ExecutarPassoRun(InstrucaoBuild instrucao, Imagem imagem, string rootfs, Action<string> saida)
     {
+        // Confinado como um container: só escreve no rootfs em construção.
+        IntegridadeBaixa.RotularPasta(rootfs);
         using var trabalho = new ObjetoTrabalho(LimitesRecursos.Nenhum, $@"Local\MiniDocker-build-{Guid.NewGuid():N}");
         var resultado = ExecutorProcesso.Executar(
-            trabalho, instrucao.Argumentos, rootfs, imagem.Ambiente, linha => saida($" ---> {linha}"));
+            trabalho, instrucao.Argumentos, rootfs, imagem.Ambiente, linha => saida($" ---> {linha}"),
+            confinado: true);
 
         if (resultado.CodigoSaida != 0)
         {
@@ -256,6 +287,13 @@ public class ServicoImagem : IServicoImagem
     {
         if (Directory.Exists(origem))
         {
+            var relativo = Path.GetRelativePath(origem, destino);
+            if (!relativo.StartsWith("..") && !Path.IsPathRooted(relativo))
+            {
+                throw new InvalidOperationException(
+                    $"COPY: '{origem}' contem a pasta do MiniDocker; copiar seria copiar a si mesmo. Use uma pasta so com os arquivos da imagem.");
+            }
+
             // Como no Docker: copia o conteúdo do diretório, não o diretório em si.
             Workspace.CopiarDiretorio(origem, destino);
             return;

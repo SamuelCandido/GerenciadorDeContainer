@@ -66,6 +66,53 @@ public static class ArquivoBuild
         return instrucoes;
     }
 
+    /// <summary>
+    /// O build sem MiniDockerfile: a pasta inteira vira a imagem. Equivale a
+    /// <code>
+    /// FROM scratch
+    /// COPY . .
+    /// CMD programa.bat    (o único .bat/.cmd/.exe da pasta, se houver)
+    /// </code>
+    /// É o caminho simples; o MiniDockerfile fica para quem precisa de <c>RUN</c>
+    /// ou de montar a imagem a partir de outra.
+    /// </summary>
+    /// <param name="detectarComando">Com <c>false</c>, não procura o CMD (ele virá do <c>--cmd</c>).</param>
+    public static IReadOnlyList<InstrucaoBuild> Implicito(string contexto, bool detectarComando)
+    {
+        var instrucoes = new List<InstrucaoBuild>
+        {
+            new("FROM", "scratch", 0),
+            new("COPY", ". .", 0)
+        };
+
+        if (detectarComando && DetectarComando(contexto) is { } programa)
+        {
+            instrucoes.Add(new InstrucaoBuild("CMD", programa, 0));
+        }
+
+        return instrucoes;
+    }
+
+    /// <summary>O único programa (<c>.bat</c>, <c>.cmd</c> ou <c>.exe</c>) na raiz da pasta.</summary>
+    public static string? DetectarComando(string contexto)
+    {
+        string[] extensoes = [".bat", ".cmd", ".exe"];
+        var programas = Directory.EnumerateFiles(contexto)
+            .Where(arquivo => extensoes.Contains(Path.GetExtension(arquivo).ToLowerInvariant()))
+            .Select(Path.GetFileName)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return programas.Count switch
+        {
+            0 => null,
+            1 => programas[0],
+            _ => throw new InvalidOperationException(
+                $"A pasta tem mais de um programa ({string.Join(", ", programas)}). " +
+                "Diga qual deve rodar com --cmd. Ex.: minidocker build -t app --cmd " + programas[0] + " PASTA")
+        };
+    }
+
     /// <summary>Aceita <c>ENV CHAVE=valor</c> e <c>ENV CHAVE valor</c>.</summary>
     public static (string Chave, string Valor) SepararEnv(string argumentos)
     {

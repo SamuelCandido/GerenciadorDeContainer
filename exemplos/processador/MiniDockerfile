@@ -1,0 +1,12 @@
+# Worker que analisa arquivos de log. Para construir (na raiz do repositorio):
+#   minidocker build -t processador exemplos\processador
+#
+# Este exemplo usa MiniDockerfile para mostrar ENV e RUN. Sem ele, a pasta
+# inteira viraria a imagem (como no exemplo backup).
+FROM scratch
+COPY processador.bat .
+ENV INTERVALO=2
+# O RUN executa AGORA, durante o build, num container isolado. O arquivo
+# gerado vai junto na imagem: todo container dela ja nasce com ele.
+RUN echo %DATE% %TIME:~0,8%> versao.txt
+CMD processador.bat

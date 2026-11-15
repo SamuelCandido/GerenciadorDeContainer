@@ -110,6 +110,8 @@ O registro em `containers.json` funciona como um **PCB (Process Control Block) s
 
 ## 5. Uma corrida que não deu para fechar
 
+> **Fechada na Etapa 3**: o processo agora nasce suspenso e só é liberado depois de entrar no job. Ver [ETAPA-3.md, seção 2](ETAPA-3.md#2-criação-suspensa).
+
 Existe uma janela entre o passo 4 e o passo 5: o processo já está rodando antes de ser atribuído ao job.
 
 O jeito correto de eliminá-la é criar o processo **suspenso** (`CREATE_SUSPENDED`), atribuí-lo ao job e só então liberá-lo — que é exatamente o que o Docker faz. A classe `Process` do .NET não expõe essa flag; fechar a janela exige chamar `CreateProcess` diretamente por P/Invoke.

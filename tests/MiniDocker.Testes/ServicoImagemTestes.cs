@@ -128,6 +128,58 @@ public class ServicoImagemTestes : IDisposable
     }
 
     [Fact]
+    public void ConstruirSemMiniDockerfileUsaAPastaEDetectaOComando()
+    {
+        var pasta = CriarPasta(("backup.bat", "@echo off"), ("config/destinos.txt", "x"));
+
+        var imagem = servico.Construir(pasta, "backup");
+
+        Assert.Equal("backup.bat", imagem.Comando);
+        Assert.True(File.Exists(Path.Combine(imagem.CaminhoRootFs, "backup.bat")));
+        Assert.True(File.Exists(Path.Combine(imagem.CaminhoRootFs, "config", "destinos.txt")));
+    }
+
+    [Fact]
+    public void ConstruirSemMiniDockerfileComVariosProgramasPedeOCmd()
+    {
+        var pasta = CriarPasta(("a.bat", ""), ("b.cmd", ""));
+
+        var erro = Assert.Throws<InvalidOperationException>(() => servico.Construir(pasta, "app"));
+        Assert.Contains("--cmd", erro.Message);
+
+        var imagem = servico.Construir(pasta, "app", comando: "b.cmd");
+        Assert.Equal("b.cmd", imagem.Comando);
+    }
+
+    [Fact]
+    public void ConstruirSemProgramaCriaImagemSemComando()
+    {
+        var imagem = servico.Construir(CriarPasta(("dados.csv", "1,2")), "dados");
+
+        Assert.Null(imagem.Comando);
+    }
+
+    [Fact]
+    public void CmdEEnvDoBuildValemPorCimaDoMiniDockerfile()
+    {
+        var contexto = CriarContexto("FROM scratch\nENV INTERVALO=2\nCMD echo original");
+
+        var imagem = servico.Construir(contexto, "app", comando: "echo novo",
+            ambiente: new Dictionary<string, string> { ["INTERVALO"] = "10", ["MODO"] = "teste" });
+
+        Assert.Equal("echo novo", imagem.Comando);
+        Assert.Equal("10", imagem.Ambiente["INTERVALO"]);
+        Assert.Equal("teste", imagem.Ambiente["MODO"]);
+    }
+
+    [Fact]
+    public void CopyDeUmaPastaQueContemOWorkspaceERecusado()
+    {
+        // Um "build ." na pasta do usuário copiaria o próprio .minidocker para dentro de si.
+        Assert.Throws<InvalidOperationException>(() => servico.Construir(diretorioTemporario, "app", comando: "x"));
+    }
+
+    [Fact]
     public void ObterAceitaPrefixoDoId()
     {
         var imagem = servico.Construir(CriarContexto("FROM scratch"), "app");
@@ -137,9 +189,15 @@ public class ServicoImagemTestes : IDisposable
 
     private string CriarContexto(string miniDockerfile, params (string Caminho, string Conteudo)[] arquivos)
     {
+        var contexto = CriarPasta(arquivos);
+        File.WriteAllText(Path.Combine(contexto, ArquivoBuild.NomePadrao), miniDockerfile);
+        return contexto;
+    }
+
+    private string CriarPasta(params (string Caminho, string Conteudo)[] arquivos)
+    {
         var contexto = Path.Combine(diretorioTemporario, "contexto-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(contexto);
-        File.WriteAllText(Path.Combine(contexto, ArquivoBuild.NomePadrao), miniDockerfile);
 
         foreach (var (caminho, conteudo) in arquivos)
         {

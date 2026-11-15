@@ -28,6 +28,41 @@ public class Conteiner
     /// <summary>Equivalente ao <c>--rm</c> do Docker: o registro some ao terminar.</summary>
     public bool RemoverAoFinalizar { get; set; }
 
+    /// <summary>Volumes montados no rootfs (<c>-v</c>).</summary>
+    public List<Montagem> Volumes { get; set; } = [];
+
+    /// <summary>
+    /// <c>--privileged</c>: roda com a integridade de quem lançou (Medium), sem
+    /// o confinamento do sistema de arquivos. Por padrão o container roda em
+    /// integridade baixa e só escreve no próprio rootfs e nos volumes.
+    /// </summary>
+    public bool Privilegiado { get; set; }
+
+    /// <summary><c>--restart</c>.</summary>
+    public PoliticaReinicio Reinicio { get; set; } = PoliticaReinicio.Nunca;
+
+    /// <summary>Quantas vezes o dono subiu o processo de novo, na execução atual.</summary>
+    public int Reinicios { get; set; }
+
+    /// <summary>
+    /// Nome do grupo de réplicas (<c>--replicas</c>, <c>scale</c>). As réplicas
+    /// se chamam <c>GRUPO-1</c>, <c>GRUPO-2</c>... e têm a mesma configuração.
+    /// </summary>
+    public string? Grupo { get; set; }
+
+    /// <summary>Projeto do compose que criou o container, para o <c>compose down</c> achá-lo.</summary>
+    public string? Projeto { get; set; }
+
+    /// <summary>Portas publicadas (<c>-p</c>), com as portas em uso na execução atual.</summary>
+    public List<MapeamentoPorta> Portas { get; set; } = [];
+
+    /// <summary>
+    /// Por que o container terminou, quando não foi um término normal: limite
+    /// de memória, falha do processo, stop. Vem dos eventos do kernel e do
+    /// código de saída; aparece no <c>ps</c>.
+    /// </summary>
+    public string? MotivoTermino { get; set; }
+
     /// <summary>
     /// Marcado pelo <c>stop</c> antes de encerrar o grupo, para que o processo
     /// dono do container registre <see cref="EstadoConteiner.Parado"/> em vez

@@ -3,6 +3,8 @@
 Explicação arquivo por arquivo do MiniDocker. Este documento cobre **o código**; os conceitos de Sistemas Operacionais por trás dele estão em [ETAPA-1.md](ETAPA-1.md).
 
 > **Desatualizado em parte.** Este passeio descreve o fluxo síncrono da Etapa 1. Na Etapa 2, `ServicoConteiner.Executar` virou `Criar` + `Iniciar`, a execução do processo foi para `Servicos/ExecutorProcesso.cs`, a persistência ganhou trava entre processos (`Repositorios/ArmazenamentoJson.cs`) e surgiram as imagens (`Modelos/Imagem.cs`, `Servicos/ServicoImagem.cs`, `Servicos/ArquivoBuild.cs`). Os conceitos novos estão em [ETAPA-2.md](ETAPA-2.md).
+>
+> Na Etapa 3, a classe `Process` saiu: o processo é criado por P/Invoke, suspenso e com token de integridade baixa (`Interop/ProcessoNativo.cs`, `Interop/IntegridadeBaixa.cs`), e o Job Object ganhou uma porta de conclusão para os erros (`Interop/MonitorEventosKernel.cs`). Surgiram os volumes (`Modelos/Montagem.cs`, `Servicos/ServicoVolume.cs`), o histórico de eventos (`Servicos/RegistroEventos.cs`), o restart (`Modelos/PoliticaReinicio.cs`) e a escala (`ServicoConteiner.Escalar`). A seção 7 abaixo, sobre a corrida, foi resolvida. Os conceitos estão em [ETAPA-3.md](ETAPA-3.md).
 
 ## 1. Arquitetura em camadas
 

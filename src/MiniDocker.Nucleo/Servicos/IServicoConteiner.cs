@@ -41,6 +41,19 @@ public interface IServicoConteiner
     /// <summary>Contabilidade ao vivo do Job Object de um container em execução.</summary>
     ContabilidadeTrabalho Estatisticas(string nomeOuId);
 
+    /// <summary>Réplicas de um grupo, em ordem (<c>GRUPO-1</c>, <c>GRUPO-2</c>...).</summary>
+    IReadOnlyList<Conteiner> ListarGrupo(string grupo);
+
+    /// <summary>
+    /// <c>scale GRUPO=N</c>: remove as réplicas excedentes e cria as que faltam
+    /// (em <c>Criado</c>), copiando a configuração da primeira.
+    /// </summary>
+    IReadOnlyList<Conteiner> Escalar(string grupo, int quantidade);
+
     /// <summary>Envia o log para <paramref name="saida"/>; com <paramref name="seguir"/>, acompanha até o container terminar.</summary>
     void LerLogs(string nomeOuId, bool seguir, Action<string> saida, CancellationToken cancelamento = default);
+
+    /// <summary>Logs de vários containers, intercalados pelo horário de cada linha.</summary>
+    void LerLogs(IReadOnlyList<string> nomesOuIds, bool seguir, Action<LinhaLog> saida,
+        CancellationToken cancelamento = default);
 }

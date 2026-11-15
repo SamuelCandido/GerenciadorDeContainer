@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MiniDocker.Nucleo.Modelos;
 
@@ -19,7 +18,6 @@ public sealed class ObjetoTrabalho : IDisposable
 {
     private const long UnidadesPorMilissegundo = 10_000; // intervalos de 100 ns
     private const int ErroArquivoNaoEncontrado = 2; // ERROR_FILE_NOT_FOUND
-    private const int ErroAcessoNegado = 5; // ERROR_ACCESS_DENIED
     private const int ErroJaExiste = 183; // ERROR_ALREADY_EXISTS
     private const uint AcessoTotal = 0x1F001F; // JOB_OBJECT_ALL_ACCESS
 
@@ -126,31 +124,19 @@ public sealed class ObjetoTrabalho : IDisposable
     /// Move o processo para dentro do grupo. A partir daqui todo processo que
     /// ele criar nasce dentro do mesmo Job Object e herda os limites.
     /// </summary>
-    /// <returns>
-    /// <c>false</c> quando o processo terminou antes de ser atribuído. Existe uma
-    /// janela entre <c>Process.Start</c> e a atribuição porque a classe
-    /// <see cref="Process"/> não expõe <c>CREATE_SUSPENDED</c>; fechá-la exige
-    /// chamar <c>CreateProcess</c> direto. Na prática a janela é de microssegundos
-    /// contra os milissegundos de inicialização do <c>cmd.exe</c>, mas um comando
-    /// que termine nela fica sem contabilidade de grupo — e, como já terminou,
-    /// também não há mais nada a limitar.
-    /// </returns>
-    public bool Atribuir(Process processo)
+    /// <remarks>
+    /// O processo chega aqui ainda suspenso (<c>CREATE_SUSPENDED</c>): ele só
+    /// executa a primeira instrução depois de estar no grupo. Até a Etapa 2
+    /// havia uma janela entre o <c>Process.Start</c> e a atribuição, porque a
+    /// classe <c>Process</c> não expõe essa flag.
+    /// </remarks>
+    internal void Atribuir(SafeKernelHandle processo)
     {
-        ArgumentNullException.ThrowIfNull(processo);
-
-        if (NativeMethods.AssignProcessToJobObject(handle, processo.Handle))
+        if (!NativeMethods.AssignProcessToJobObject(handle, processo.DangerousGetHandle()))
         {
-            return true;
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Nao foi possivel atribuir o processo ao Job Object.");
         }
-
-        var erro = Marshal.GetLastWin32Error();
-        if (erro == ErroAcessoNegado && processo.HasExited)
-        {
-            return false;
-        }
-
-        throw new Win32Exception(erro, "Nao foi possivel atribuir o processo ao Job Object.");
     }
 
     /// <summary>
@@ -190,6 +176,13 @@ public sealed class ObjetoTrabalho : IDisposable
             FalhasDePagina: contabilidade.TotalPageFaultCount,
             ProcessosAtivos: (int)contabilidade.ActiveProcesses);
     }
+
+    /// <summary>
+    /// Passa a receber os eventos que o kernel posta sobre o grupo. Só o dono
+    /// do job chama isto, logo após criá-lo: um job aceita uma única porta.
+    /// </summary>
+    public MonitorEventosKernel MonitorarEventos(Action<EventoKernel> aoReceber) =>
+        new(handle, aoReceber);
 
     /// <summary>Encerra de uma vez todos os processos do grupo.</summary>
     public void Encerrar(int codigoSaida = 1)

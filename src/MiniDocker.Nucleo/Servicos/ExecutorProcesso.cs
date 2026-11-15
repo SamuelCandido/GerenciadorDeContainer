@@ -1,4 +1,7 @@
-using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 using MiniDocker.Nucleo.Interop;
 using MiniDocker.Nucleo.Modelos;
 
@@ -8,75 +11,120 @@ internal sealed record ResultadoExecucao(int CodigoSaida, ContabilidadeTrabalho 
 
 /// <summary>
 /// Lança o processo principal de um container dentro de um Job Object já
-/// criado. Usado pelo start do container e pelos passos <c>RUN</c> do build,
-/// que também rodam isolados.
+/// criado. Usado pelo start do container, pelo exec e pelos passos <c>RUN</c>
+/// do build, que também rodam isolados.
+///
+/// Todo processo nasce assim:
+/// <code>
+/// CreateProcess(CREATE_SUSPENDED, token Low) → AssignProcessToJobObject → ResumeThread
+/// </code>
 /// </summary>
 internal static class ExecutorProcesso
 {
+    private const uint AcessoLeitura = 0x80000000; // GENERIC_READ
+    private const uint CompartilharTudo = 0x3;     // FILE_SHARE_READ | FILE_SHARE_WRITE
+    private const uint AbrirExistente = 3;         // OPEN_EXISTING
+
+    /// <summary>
+    /// Handles herdáveis existem desde o <c>CreatePipe</c> até o pai fechar a
+    /// sua cópia. Se outra thread criasse um processo nesse intervalo, ele
+    /// herdaria a ponta de escrita do pipe e a leitura nunca chegaria ao fim.
+    /// A trava serializa esse trecho — a classe <c>Process</c> faz o mesmo.
+    /// </summary>
+    private static readonly object TravaCriacao = new();
+
+    static ExecutorProcesso()
+    {
+        // O cmd.exe escreve na página de código do console (850, 437...), que
+        // o .NET só conhece com este provedor.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+    }
+
     /// <param name="saida">
     /// Recebe cada linha de stdout/stderr. Com <c>null</c>, o processo herda o
     /// console de quem chamou — é o modo interativo (<c>-it</c>), sem log.
     /// </param>
+    /// <param name="confinado">Roda com integridade baixa: só escreve no rootfs e nos volumes.</param>
     public static ResultadoExecucao Executar(
         ObjetoTrabalho trabalho,
         string comando,
         string caminhoRootFs,
         IReadOnlyDictionary<string, string> ambiente,
         Action<string>? saida,
+        bool confinado,
         Action<int>? aoIniciar = null)
     {
-        var redirecionar = saida is not null;
-        using var processo = CriarProcesso(comando, caminhoRootFs, ambiente, redirecionar);
+        SafeFileHandle? leitura = null;
+        ProcessoNativo processo;
 
-        if (saida is not null)
+        using (var token = confinado ? IntegridadeBaixa.CriarToken() : null)
         {
-            // stdout e stderr chegam em threads diferentes; a trava mantém as
-            // linhas inteiras no log.
-            var trava = new object();
-            DataReceivedEventHandler encaminhar = (_, e) =>
+            lock (TravaCriacao)
             {
-                if (e.Data is { } linha)
+                SafeFileHandle? escrita = null;
+                SafeFileHandle? entrada = null;
+                try
                 {
-                    lock (trava)
+                    if (saida is not null)
                     {
-                        saida(linha);
+                        (leitura, escrita) = CriarPipe();
+                        entrada = AbrirNul();
                     }
+
+                    processo = Criar(comando, caminhoRootFs, ambiente, token, escrita, entrada);
                 }
-            };
-            processo.OutputDataReceived += encaminhar;
-            processo.ErrorDataReceived += encaminhar;
+                catch
+                {
+                    leitura?.Dispose();
+                    throw;
+                }
+                finally
+                {
+                    // O filho já tem a cópia dele. Se o pai mantivesse a ponta de
+                    // escrita aberta, a leitura nunca receberia fim de arquivo.
+                    escrita?.Dispose();
+                    entrada?.Dispose();
+                }
+            }
         }
 
-        processo.Start();
-        var noGrupo = trabalho.Atribuir(processo);
-        aoIniciar?.Invoke(processo.Id);
-
-        if (redirecionar)
+        using (processo)
         {
-            processo.BeginOutputReadLine();
-            processo.BeginErrorReadLine();
+            Thread? leitor = null;
+            try
+            {
+                trabalho.Atribuir(processo.Handle);
+                aoIniciar?.Invoke(processo.Id);
+
+                if (saida is not null)
+                {
+                    leitor = IniciarLeitura(leitura!, saida);
+                }
+
+                processo.Retomar();
+            }
+            catch
+            {
+                // Ainda suspenso: nunca executou nada. Encerrado aqui, não sobra.
+                processo.Encerrar();
+                leitura?.Dispose();
+                throw;
+            }
+
+            var codigoSaida = processo.AguardarSaida();
+
+            // Como no Docker, o container acaba quando o processo principal acaba.
+            // Netos que ficaram para trás (um "start /b") são encerrados aqui; sem
+            // isso eles segurariam o pipe de saída aberto e a leitura não terminaria.
+            trabalho.EncerrarRestantes();
+            var contabilidade = trabalho.Contabilizar();
+
+            // Agora que ninguém mais segura o pipe, espera o fim da leitura para
+            // não perder as últimas linhas.
+            leitor?.Join();
+
+            return new ResultadoExecucao(codigoSaida, contabilidade);
         }
-
-        AguardarProcessoPrincipal(processo);
-        var codigoSaida = processo.ExitCode;
-
-        // Como no Docker, o container acaba quando o processo principal acaba.
-        // Netos que ficaram para trás (um "start /b") são encerrados aqui; sem
-        // isso eles segurariam o pipe de saída aberto e a leitura não terminaria.
-        trabalho.EncerrarRestantes();
-
-        var contabilidade = noGrupo
-            ? trabalho.Contabilizar()
-            : new ContabilidadeTrabalho(0, 0, 0, 0);
-
-        if (redirecionar)
-        {
-            // Agora que ninguém mais segura o pipe, espera o fim da leitura
-            // para não perder as últimas linhas.
-            processo.WaitForExit();
-        }
-
-        return new ResultadoExecucao(codigoSaida, contabilidade);
     }
 
     /// <summary>
@@ -87,49 +135,50 @@ internal static class ExecutorProcesso
         ObjetoTrabalho trabalho,
         string comando,
         string caminhoRootFs,
-        IReadOnlyDictionary<string, string> ambiente)
+        IReadOnlyDictionary<string, string> ambiente,
+        bool confinado)
     {
-        using var processo = CriarProcesso(comando, caminhoRootFs, ambiente, redirecionar: false);
-        processo.Start();
-        trabalho.Atribuir(processo);
-        processo.WaitForExit();
-        return processo.ExitCode;
-    }
-
-    /// <summary>
-    /// Espera só pelo processo principal. <c>WaitForExit()</c> sem argumentos
-    /// também esperaria o fim dos pipes redirecionados, que um neto pode manter
-    /// abertos indefinidamente; com timeout finito ele espera só o processo.
-    /// </summary>
-    private static void AguardarProcessoPrincipal(Process processo)
-    {
-        while (!processo.WaitForExit(int.MaxValue))
+        ProcessoNativo processo;
+        using (var token = confinado ? IntegridadeBaixa.CriarToken() : null)
         {
+            processo = Criar(comando, caminhoRootFs, ambiente, token, saida: null, entrada: null);
+        }
+
+        using (processo)
+        {
+            try
+            {
+                trabalho.Atribuir(processo.Handle);
+                processo.Retomar();
+            }
+            catch
+            {
+                processo.Encerrar();
+                throw;
+            }
+
+            return processo.AguardarSaida();
         }
     }
 
-    private static Process CriarProcesso(
+    private static ProcessoNativo Criar(
         string comando,
         string caminhoRootFs,
         IReadOnlyDictionary<string, string> ambiente,
-        bool redirecionar)
+        SafeKernelHandle? token,
+        SafeFileHandle? saida,
+        SafeFileHandle? entrada)
     {
-        var informacoes = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
-            WorkingDirectory = caminhoRootFs,
-            UseShellExecute = false,
-            RedirectStandardOutput = redirecionar,
-            RedirectStandardError = redirecionar,
-            // Com a saída redirecionada o container não precisa de console; sem
-            // isto, um container lançado pelo shim (que não tem console) faria
-            // o Windows abrir uma janela nova para o cmd.exe.
-            CreateNoWindow = redirecionar
-        };
-        informacoes.ArgumentList.Add("/c");
-        informacoes.ArgumentList.Add(comando);
-        IsolarAmbiente(informacoes, caminhoRootFs, ambiente);
-        return new Process { StartInfo = informacoes };
+        var raizWindows = RaizWindows();
+        var cmd = Path.Combine(raizWindows, "System32", "cmd.exe");
+
+        // /s /c "...": o cmd tira só o primeiro e o último caractere de aspas e
+        // executa o resto como foi escrito, com aspas internas preservadas.
+        var linhaComando = $"\"{cmd}\" /s /c \"{comando}\"";
+
+        return ProcessoNativo.CriarSuspenso(
+            cmd, linhaComando, caminhoRootFs, MontarAmbiente(raizWindows, caminhoRootFs, ambiente),
+            token, saida, entrada);
     }
 
     /// <summary>
@@ -139,24 +188,106 @@ internal static class ExecutorProcesso
     /// então arquivos temporários do container ficam dentro dele. Por cima vêm
     /// as variáveis da imagem (<c>ENV</c>) e do <c>-e</c>.
     /// </summary>
-    private static void IsolarAmbiente(
-        ProcessStartInfo informacoes,
+    private static Dictionary<string, string> MontarAmbiente(
+        string raizWindows,
         string caminhoRootFs,
         IReadOnlyDictionary<string, string> ambiente)
     {
-        var raizWindows = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
-
-        informacoes.Environment.Clear();
-        informacoes.Environment["SystemRoot"] = raizWindows;
-        informacoes.Environment["ComSpec"] = Path.Combine(raizWindows, "system32", "cmd.exe");
-        informacoes.Environment["Path"] =
-            $"{Path.Combine(raizWindows, "system32")};{raizWindows}";
-        informacoes.Environment["TEMP"] = caminhoRootFs;
-        informacoes.Environment["TMP"] = caminhoRootFs;
+        var resultado = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = raizWindows,
+            ["ComSpec"] = Path.Combine(raizWindows, "System32", "cmd.exe"),
+            ["Path"] = $"{Path.Combine(raizWindows, "System32")};{raizWindows}",
+            ["TEMP"] = caminhoRootFs,
+            ["TMP"] = caminhoRootFs
+        };
 
         foreach (var (chave, valor) in ambiente)
         {
-            informacoes.Environment[chave] = valor;
+            resultado[chave] = valor;
+        }
+
+        return resultado;
+    }
+
+    private static string RaizWindows() =>
+        Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+
+    /// <summary>
+    /// Um pipe só para stdout e stderr: as duas saídas chegam na ordem em que
+    /// foram escritas. Só a ponta de escrita é herdável — é ela que vai para o
+    /// container; a de leitura fica com o dono.
+    /// </summary>
+    private static (SafeFileHandle Leitura, SafeFileHandle Escrita) CriarPipe()
+    {
+        var atributos = AtributosHerdaveis();
+        if (!NativeMetodosProcesso.CreatePipe(out var leitura, out var escrita, ref atributos, 0))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Nao foi possivel criar o pipe de saida.");
+        }
+
+        NativeMetodosProcesso.SetHandleInformation(leitura, NativeMetodosProcesso.HandleFlagInherit, 0);
+        return (leitura, escrita);
+    }
+
+    /// <summary>O stdin do container em segundo plano é o dispositivo nulo, como um <c>&lt; nul</c>.</summary>
+    private static SafeFileHandle AbrirNul()
+    {
+        var atributos = AtributosHerdaveis();
+        var handle = NativeMetodosProcesso.CreateFileW(
+            "NUL", AcessoLeitura, CompartilharTudo, ref atributos, AbrirExistente, 0, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Nao foi possivel abrir NUL.");
+        }
+
+        return handle;
+    }
+
+    private static SECURITY_ATTRIBUTES AtributosHerdaveis() => new()
+    {
+        nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+        bInheritHandle = 1
+    };
+
+    private static Thread IniciarLeitura(SafeFileHandle leitura, Action<string> saida)
+    {
+        var leitor = new Thread(() =>
+        {
+            using var fluxo = new FileStream(leitura, FileAccess.Read, 4096, isAsync: false);
+            using var texto = new StreamReader(fluxo, CodificacaoConsole());
+
+            // ReadLine devolve null quando todas as pontas de escrita fecharam.
+            while (texto.ReadLine() is { } linha)
+            {
+                saida(linha);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "minidocker-saida"
+        };
+
+        leitor.Start();
+        return leitor;
+    }
+
+    private static Encoding CodificacaoConsole()
+    {
+        var pagina = NativeMetodosProcesso.GetConsoleOutputCP();
+        if (pagina == 0)
+        {
+            // O shim não tem console; o cmd.exe usa então a página OEM do sistema.
+            pagina = NativeMetodosProcesso.GetOEMCP();
+        }
+
+        try
+        {
+            return Encoding.GetEncoding((int)pagina);
+        }
+        catch (Exception excecao) when (excecao is ArgumentException or NotSupportedException)
+        {
+            return Encoding.UTF8;
         }
     }
 }
